@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+"""Решение КОЗ-3: хиллшейды из LAS и не-лидарные снимки -> сегментация YOLO
+-> GeoJSON FeatureCollection в EPSG:3857."""
 import argparse
 import json
 import logging
@@ -33,112 +34,47 @@ from shapely.validation import make_valid
 from ultralytics import YOLO
 
 
-class Colors:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RED = "\033[31m"
-    YELLOW = "\033[33m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
-    BRIGHT_BLACK = "\033[90m"
-    BRIGHT_RED = "\033[91m"
-    BRIGHT_GREEN = "\033[92m"
-    BRIGHT_YELLOW = "\033[93m"
-    BRIGHT_BLUE = "\033[94m"
-    BRIGHT_MAGENTA = "\033[95m"
-    BRIGHT_CYAN = "\033[96m"
-    BRIGHT_WHITE = "\033[97m"
-    BG_RED = "\033[41m"
-
-
-class ColoredFormatter(logging.Formatter):
-    """Custom formatter with colors and table-style layout."""
-    
-    FORMATS = {
-        logging.DEBUG: f"{Colors.BRIGHT_BLACK}%(levelname)-8s{Colors.RESET} {Colors.DIM}│{Colors.RESET} %(message)s",
-        logging.INFO: f"{Colors.BRIGHT_CYAN}%(levelname)-8s{Colors.RESET} {Colors.DIM}│{Colors.RESET} %(message)s",
-        logging.WARNING: f"{Colors.BRIGHT_YELLOW}%(levelname)-8s{Colors.RESET} {Colors.DIM}│{Colors.RESET} {Colors.YELLOW}%(message)s{Colors.RESET}",
-        logging.ERROR: f"{Colors.BRIGHT_RED}%(levelname)-8s{Colors.RESET} {Colors.DIM}│{Colors.RESET} {Colors.RED}%(message)s{Colors.RESET}",
-        logging.CRITICAL: f"{Colors.BG_RED}{Colors.WHITE}%(levelname)-8s{Colors.RESET} {Colors.DIM}│{Colors.RESET} {Colors.BRIGHT_RED}%(message)s{Colors.RESET}",
-    }
-
-    def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
-        return formatter.format(record)
-
-
-handler = logging.StreamHandler()
-handler.setFormatter(ColoredFormatter())
-logging.basicConfig(level=logging.INFO, handlers=[handler])
+logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
 logger = logging.getLogger("solution")
 
 
-def log_header(title: str, char: str = "═", width: int = 80):
-    """Log a formatted header."""
-    logger.info(f"{Colors.BRIGHT_BLUE}{Colors.BOLD}{char * width}{Colors.RESET}")
-    logger.info(f"{Colors.BRIGHT_BLUE}{Colors.BOLD}{title.center(width)}{Colors.RESET}")
-    logger.info(f"{Colors.BRIGHT_BLUE}{Colors.BOLD}{char * width}{Colors.RESET}")
+def log_header(title: str) -> None:
+    """Крупный заголовок этапа между разделителями из '='."""
+    logger.info("%s", "=" * 80)
+    logger.info("%s", title)
+    logger.info("%s", "=" * 80)
 
 
-def log_section(title: str, char: str = "─", width: int = 80):
-    """Log a formatted section divider."""
-    logger.info(f"{Colors.CYAN}{char * width}{Colors.RESET}")
-    logger.info(f"{Colors.CYAN}{Colors.BOLD}  {title}{Colors.RESET}")
-    logger.info(f"{Colors.CYAN}{char * width}{Colors.RESET}")
+def log_section(title: str) -> None:
+    """Заголовок секции между разделителями из '-'."""
+    logger.info("%s", "-" * 80)
+    logger.info("%s", title)
+    logger.info("%s", "-" * 80)
 
 
-def log_subsection(title: str, width: int = 80):
-    """Log a formatted subsection."""
-    logger.info(f"{Colors.DIM}  {'·' * width}{Colors.RESET}")
-    logger.info(f"{Colors.BRIGHT_WHITE}{Colors.BOLD}    {title}{Colors.RESET}")
-    logger.info(f"{Colors.DIM}  {'·' * width}{Colors.RESET}")
+def log_subsection(title: str) -> None:
+    """Заголовок подсекции."""
+    logger.info("%s:", title)
 
 
-def log_table_row(label: str, value: Any, label_width: int = 30):
-    """Log a table-style row with label and value."""
-    logger.info(
-        f"{Colors.DIM}  │{Colors.RESET} "
-        f"{Colors.BRIGHT_WHITE}{label:<{label_width}}{Colors.RESET} "
-        f"{Colors.DIM}│{Colors.RESET} "
-        f"{Colors.BRIGHT_GREEN}{value}{Colors.RESET}"
-    )
+def log_table_row(label: str, value: Any) -> None:
+    """Логирует строку параметра вида «label: value»."""
+    logger.info("  %s: %s", label, value)
 
 
-def log_metric(label: str, value: Any, unit: str = "", label_width: int = 30):
-    """Log a metric with highlighting."""
-    display_value = f"{value} {unit}".strip() if unit else str(value)
-    logger.info(
-        f"{Colors.DIM}  │{Colors.RESET} "
-        f"{Colors.WHITE}{label:<{label_width}}{Colors.RESET} "
-        f"{Colors.DIM}→{Colors.RESET} "
-        f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{display_value}{Colors.RESET}"
-    )
-
-
-#: Ширина рамки, в которую печатается заголовок обрабатываемого файла.
-FILE_BOX_WIDTH = 76
+def log_metric(label: str, value: Any, unit: str = "") -> None:
+    """Логирует значение метрики, опционально с единицей."""
+    display = f"{value} {unit}".strip() if unit else value
+    logger.info("  %s: %s", label, display)
 
 
 def log_file_header(label: str) -> None:
-    """Рамка с заголовком файла (паддинг считается, а не подбирается вручную)."""
-    text = f"File {label}"
-    padding = " " * max(0, FILE_BOX_WIDTH - 1 - len(text))
-    logger.info(f"{Colors.DIM}  ┌{'─' * FILE_BOX_WIDTH}┐{Colors.RESET}")
-    logger.info(
-        f"{Colors.DIM}  │{Colors.RESET} {Colors.BRIGHT_CYAN}{Colors.BOLD}{text}{Colors.RESET}"
-        f"{Colors.DIM}{padding}│{Colors.RESET}"
-    )
-    logger.info(f"{Colors.DIM}  ├{'─' * FILE_BOX_WIDTH}┤{Colors.RESET}")
+    """Логирует заголовок обрабатываемого файла."""
+    logger.info("--- File %s ---", label)
 
 
-def log_file_footer() -> None:
-    logger.info(f"{Colors.DIM}  └{'─' * FILE_BOX_WIDTH}┘{Colors.RESET}\n")
-
-
-def log_timing(label: str, elapsed_seconds: float, label_width: int = 30):
-    """Log timing information with formatting."""
+def log_timing(label: str, elapsed_seconds: float) -> None:
+    """Логирует время выполнения в человекочитаемом виде."""
     if elapsed_seconds < 1:
         time_str = f"{elapsed_seconds * 1000:.0f}ms"
     elif elapsed_seconds < 60:
@@ -147,16 +83,10 @@ def log_timing(label: str, elapsed_seconds: float, label_width: int = 30):
         minutes = int(elapsed_seconds // 60)
         seconds = elapsed_seconds % 60
         time_str = f"{minutes}m {seconds:.1f}s"
-    
-    logger.info(
-        f"{Colors.DIM}  │{Colors.RESET} "
-        f"{Colors.WHITE}{label:<{label_width}}{Colors.RESET} "
-        f"{Colors.DIM}⏱{Colors.RESET} "
-        f"{Colors.BRIGHT_YELLOW}{Colors.BOLD}{time_str}{Colors.RESET}"
-    )
+    logger.info("  %s: %s", label, time_str)
 
 
-#: Фиксированное зерно по умолчанию: один и тот же вход → один и тот же result.geojson.
+#: Фиксированное зерно по умолчанию: один и тот же вход -> один и тот же result.geojson.
 DEFAULT_SEED = 42
 
 
@@ -333,7 +263,7 @@ def drop_unsupported_classes(features: List[Dict[str, Any]]) -> List[Dict[str, A
     if dropped:
         summary = ", ".join(f"{name}: {count}" for name, count in sorted(dropped.items()))
         logger.warning(
-            "  ⚠️  Dropped %d feature(s) with classes outside the metric registry (%s); "
+            "Dropped %d feature(s) with classes outside the metric registry (%s); "
             "no canonical counterpart in KOZ3",
             sum(dropped.values()), summary,
         )
@@ -352,7 +282,7 @@ def drop_empty_geometries(features: List[Dict[str, Any]]) -> List[Dict[str, Any]
         else:
             dropped += 1
     if dropped:
-        logger.warning("  ⚠️  Dropped %d feature(s) without valid coordinates", dropped)
+        logger.warning("Dropped %d feature(s) without valid coordinates", dropped)
     return kept
 
 
@@ -461,7 +391,7 @@ def load_model(model_path: str, device: str = "auto"):
             device = "mps:0"
         else:
             device = "cpu"
-    log_metric("Device", device, "🚀")
+    log_metric("Device", device)
     model = YOLO(model_path)
     target_device = "mps" if device.startswith("mps") else device
     model.to(target_device)
@@ -484,20 +414,20 @@ def load_model(model_path: str, device: str = "auto"):
     for idx, raw in names.items():
         canonical = normalize_class_name(raw)
         if canonical in VALID_CLASS_NAMES:
-            mapped.append(f"{raw} → {canonical}" if canonical != raw else raw)
+            mapped.append(f"{raw} -> {canonical}" if canonical != raw else raw)
         else:
             unknown.append(raw)
     log_metric("Model classes (mapped)", len(mapped))
     for entry in mapped:
-        logger.info(f"{Colors.DIM}      ✓ {entry}{Colors.RESET}")
+        logger.info("  %s", entry)
     if unknown:
         logger.warning(
-            "  ⚠️  %d model class(es) have no canonical mapping and their objects will be "
+            "%d model class(es) have no canonical mapping and their objects will be "
             "DROPPED (the metric registry rejects any other class_name): %s",
             len(unknown), unknown,
         )
     if not mapped:
-        logger.warning("  ⚠️  None of the model's classes match the expected canonical set! "
+        logger.warning("None of the model's classes match the expected canonical set! "
                        "Expected: %s", CLASS_NAMES)
 
     return model, names
@@ -632,7 +562,7 @@ def load_region_crs(dir: Path) -> Optional[str]:
 
 
 def _wkt_to_crs(payload: bytes) -> Optional[str]:
-    """WKT из VLR LAS → строка CRS ('EPSG:xxxx', если код определяется)."""
+    """WKT из VLR LAS -> строка CRS ('EPSG:xxxx', если код определяется)."""
     text = payload.decode("utf-8", "ignore").strip("\x00").strip()
     if not text:
         return None
@@ -695,8 +625,8 @@ def load_las_crs(path: Path) -> Optional[str]:
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  LAS → стандартный набор хиллшейдов (c / ch / g / i)
+# -----------------------------------------------------------------------------
+#  LAS -> стандартный набор хиллшейдов (c / ch / g / i)
 #
 #  Портировано из Supplementary/hillshade/make_hillshades.py: бейзлайн больше не
 #  ищет готовые растры `*Lidar*.tif` / `*_Li_карты_*.tif`, а строит их сам из
@@ -712,7 +642,7 @@ def load_las_crs(path: Path) -> Optional[str]:
 #  уже отфильтрована и сохранена под другим классом). За пределами контура
 #  съёмки сохраняется nodata, как в эталонах: у `g`/`i` это 255 (белый фон),
 #  у `c`/`ch` — 0 (чёрный).
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 #: Яркость палитры «Hot to cold»: в эталонах S = 1.0, V ≈ 209/255.
 HOT_TO_COLD_VALUE = 209.0 / 255.0
@@ -960,8 +890,8 @@ def build_dem_from_las(las_path: Path, res: float = 0.1, interp: str = "mean",
         left, bottom, width, height = _extent(res)
         if factor > 1:
             logger.info(
-                f"{Colors.DIM}      габариты дают слишком большой растр → "
-                f"шаг увеличен в {factor}× до {res:g} м{Colors.RESET}"
+                f"габариты дают слишком большой растр, "
+                f"шаг увеличен в {factor}× до {res:g} м"
             )
     transform = from_origin(left, bottom + height * res, res, res)
     top = transform.f
@@ -1003,7 +933,7 @@ def build_dem_from_las(las_path: Path, res: float = 0.1, interp: str = "mean",
 
     sums, counts, peaks, classes, selected = _accumulate(use_all)
     if selected == 0 and not use_all:
-        logger.warning("      класса %s в файле нет (есть %s) → берём все точки",
+        logger.warning("класса %s в файле нет (есть %s), берём все точки",
                        ground_class, classes)
         del sums, counts, peaks
         sums, counts, peaks, classes, selected = _accumulate(True)
@@ -1047,7 +977,7 @@ def hillshade_esri(dem: np.ndarray, res_x: float, res_y: float,
 
 
 def hsv_to_rgb_u8(hue: np.ndarray, sat: np.ndarray, val: np.ndarray) -> np.ndarray:
-    """Векторный HSV→RGB (uint8, поканально) без зависимости от matplotlib."""
+    """Векторный HSV->RGB (uint8, поканально) без зависимости от matplotlib."""
     h = (np.asarray(hue) % 1.0) * 6.0
     i = np.floor(h).astype(np.int32) % 6
     f = h - np.floor(h)
@@ -1378,7 +1308,7 @@ def _infer_image(
     infer: InferConfig,
     verbose: bool = True
 ) -> List[Dict[str, Any]]:
-    """prepare → CLAHE → (downscale) → (align) → тайловый инференс → GeoJSON-фичи."""
+    """prepare -> CLAHE -> (downscale) -> (align) -> тайловый инференс -> GeoJSON-фичи."""
     prep_start = time.time()
     working_image = prepare_image(image)
     if verbose:
@@ -1422,12 +1352,12 @@ def _infer_image(
 
     if not detections:
         if verbose:
-            log_table_row("Detections", f"{Colors.DIM}0 (no objects found){Colors.RESET}")
+            log_table_row("Detections", "0 (no objects found)")
         return []
 
     crs = source_crs or "EPSG:32636"
     if "LOCAL_CS" in str(crs).upper():
-        logger.warning("  ⚠️  LOCAL_CS detected, falling back to EPSG:32636")
+        logger.warning("LOCAL_CS detected, falling back to EPSG:32636")
         crs = "EPSG:32636"
 
     feat_start = time.time()
@@ -1444,7 +1374,7 @@ def _infer_image(
         markup_type=markup_type
     )
     if verbose:
-        log_metric("Features Generated", len(features), "✓")
+        log_metric("Features Generated", len(features))
         log_timing("Feature Conversion Time", time.time() - feat_start)
     return features
 
@@ -1476,21 +1406,20 @@ def process_hillshade(
         features = _infer_image(model, class_names, data, transform,
                                 region_crs or file_crs, region_name, "li", infer)
     except Exception as exc:
-        logger.error("  ✗ Failed: %s", exc)
+        logger.error("Failed: %s", exc)
 
     log_timing("Total File Time", time.time() - file_start_time)
-    log_file_footer()
     return features
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  Не-лидарные модальности (ортофото / спутник / аэрофото)
 #
 #  Готовые хиллшейды (`*_Lidar_*.tif`, `*_Li_карты*`) по-прежнему не читаются:
 #  лидарный набор строится из LAS. Остальные снимки площадки можно подать в
 #  модель тем же пайплайном — они читаются окнами, потому что орто/аэро бывают
 #  в сотни Мпикс и целиком в память не влезают.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 EXTRA_MODALITIES = ("or", "sp_or", "ae")
 
@@ -1569,15 +1498,14 @@ def process_extra_raster(
                         batch = []
                     if batch:
                         logger.info(
-                            f"{Colors.DIM}    окно {row + 1}/{rows}×{col + 1}/{cols} "
-                            f"({w}×{h}): +{len(batch)} фич{Colors.RESET}"
+                            f"окно {row + 1}/{rows}, колонка {col + 1}/{cols} "
+                            f"({w}×{h}): +{len(batch)} фич"
                         )
                     features.extend(batch)
                     del data
     except Exception as exc:
-        logger.error("  ✗ Failed: %s", exc)
+        logger.error("Failed: %s", exc)
     log_timing("Total File Time", time.time() - file_start_time)
-    log_file_footer()
     return features
 
 
@@ -1613,11 +1541,11 @@ def process_region(
     window_pixels: int = 48_000_000
 ) -> List[Dict[str, Any]]:
     region_start_time = time.time()
-    log_section(f"🏗️  Processing Region: {region_dir.name}")
+    log_section(f"Processing Region: {region_dir.name}")
     las_files = find_las_files(region_dir)
     extra_rasters = find_extra_rasters(region_dir, extra_modalities)
     if not las_files and not extra_rasters:
-        logger.warning("  ⚠️  No LAS files found")
+        logger.warning("No LAS files found")
         return []
     region_crs = load_region_crs(region_dir)
     if region_crs:
@@ -1632,7 +1560,10 @@ def process_region(
         log_table_row("Region CRS", "Auto-detect (from rasters)")
     log_table_row("LAS Files Found", len(las_files))
     if extra_modalities:
-        log_table_row("Extra Rasters", f"{len(extra_rasters)} ({', '.join(sorted({m for _, m in extra_rasters})) or '—'})")
+        log_table_row(
+            "Extra Rasters",
+            f"{len(extra_rasters)} ({', '.join(sorted({m for _, m in extra_rasters})) or 'none'})",
+        )
 
     # Готовые хиллшейды строим сами из LAS во временный каталог (или сохраняем,
     # если задан --keep-hillshades) — входные растры больше не ищутся.
@@ -1663,12 +1594,12 @@ def process_region(
                     )
                 )
             except Exception as exc:
-                logger.error("  ✗ %s: %s", las_path.name, exc)
+                logger.error("%s: %s", las_path.name, exc)
         hillshades = list(dict.fromkeys(hillshades))
         if las_files:
             log_timing("Hillshade Build Time", time.time() - build_start)
         if not hillshades and not extra_rasters:
-            logger.warning("  ⚠️  No hillshades built")
+            logger.warning("No hillshades built")
             return []
         log_table_row("Hillshades Built", len(hillshades))
 
@@ -1744,7 +1675,7 @@ def _resolve_paths(input_dir: str, output_dir: str,
 
 
 def _log_config(cfg: RunConfig, input_dir: str, output_dir: str, weights: Path) -> None:
-    log_section("📋 Configuration")
+    log_section("Configuration")
     log_table_row("Input Directory", input_dir)
     log_table_row("Output Directory", output_dir)
     log_table_row("Model Weights", weights.name)
@@ -1758,12 +1689,15 @@ def _log_config(cfg: RunConfig, input_dir: str, output_dir: str, weights: Path) 
     log_table_row("Tile Overlap", f"{cfg.infer.overlap_ratio:.1%}")
 
     log_subsection("Preprocessing Options")
-    log_table_row("CLAHE Enhancement", "✓ Enabled" if cfg.infer.enable_clahe else "✗ Disabled")
+    log_table_row("CLAHE Enhancement", "enabled" if cfg.infer.enable_clahe else "disabled")
     if cfg.infer.enable_clahe:
-        log_table_row("  └─ Clip Limit", f"{cfg.infer.clahe_clip_limit:.1f}")
-        log_table_row("  └─ Tile Grid Size", f"{cfg.infer.clahe_tile_size}×{cfg.infer.clahe_tile_size}")
-    log_table_row("Downscaling", "✓ Enabled" if cfg.infer.enable_downscale else "✗ Disabled")
-    log_table_row("Alignment & Rotation", "✓ Enabled" if cfg.infer.enable_alignment else "✗ Disabled")
+        log_table_row("CLAHE Clip Limit", f"{cfg.infer.clahe_clip_limit:.1f}")
+        log_table_row(
+            "CLAHE Tile Grid Size",
+            f"{cfg.infer.clahe_tile_size}×{cfg.infer.clahe_tile_size}",
+        )
+    log_table_row("Downscaling", "enabled" if cfg.infer.enable_downscale else "disabled")
+    log_table_row("Alignment & Rotation", "enabled" if cfg.infer.enable_alignment else "disabled")
 
     log_subsection("Hillshades (built from LAS)")
     cycles_note = f"{cfg.hillshade_cycles_c:g} / {cfg.hillshade_cycles_ch:g}" if cfg.hillshade_cycles_ch \
@@ -1773,21 +1707,24 @@ def _log_config(cfg: RunConfig, input_dir: str, output_dir: str, weights: Path) 
     log_table_row("DEM Interpolation", cfg.hillshade_interp)
     log_table_row("Ground Class", cfg.hillshade_class)
     log_table_row("Palette Cycles c/ch", cycles_note)
-    log_table_row("Keep Hillshades", cfg.keep_hillshades or "✗ (temp dir)")
+    log_table_row("Keep Hillshades", cfg.keep_hillshades or "temp dir")
 
     log_subsection("Post-Processing")
-    log_table_row("Polygon Merging", "✓ Enabled (--merge)" if cfg.enable_merge else "✗ Disabled (dedup only)")
+    log_table_row(
+        "Polygon Merging",
+        "enabled (--merge)" if cfg.enable_merge else "disabled (dedup only)",
+    )
     if cfg.enable_merge:
         log_table_row("Merge Buffer", f"{cfg.merge_buffer:.1f} м")
     log_table_row("Minimum Area", f"{cfg.min_area:.1f} м²")
 
     log_subsection("Extra modalities (non-LiDAR)")
-    log_table_row("Modalities", ", ".join(cfg.extra_modalities) or "✗ Disabled")
+    log_table_row("Modalities", ", ".join(cfg.extra_modalities) or "disabled")
     log_table_row("Window Size", f"{cfg.window_pixels / 1e6:.0f} Mpx per window")
 
     log_subsection("Determinism")
     log_table_row("Random Seed", cfg.seed)
-    log_table_row("cuDNN Deterministic", "✓ Yes (benchmark off)")
+    log_table_row("cuDNN Deterministic", "yes (benchmark off)")
 
     log_subsection("GPU Optimization")
     if torch.cuda.is_available():
@@ -1795,10 +1732,10 @@ def _log_config(cfg: RunConfig, input_dir: str, output_dir: str, weights: Path) 
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         log_table_row("GPU Device", f"{gpu_name}")
         log_table_row("GPU Memory", f"{gpu_memory:.1f} GB")
-        log_table_row("CUDA Enabled", "✓ Yes")
-        log_table_row("Mixed Precision", "✓ FP32 (Disabled)")
+        log_table_row("CUDA Enabled", "yes")
+        log_table_row("Mixed Precision", "FP32 (disabled)")
     else:
-        log_table_row("GPU Available", "✗ No (CPU Mode)")
+        log_table_row("GPU Available", "no (CPU mode)")
 
 
 def _find_region_dirs(input_path: Path) -> List[Path]:
@@ -1842,7 +1779,7 @@ def _collect_features(model, class_names: Dict[int, str], region_dirs: List[Path
 def _postprocess(collected: List[Dict[str, Any]],
                  cfg: RunConfig) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """Класс-фильтр, чистка геометрий, дедупликация, (слияние | фильтр площади), FID."""
-    log_section("📊 Post-Processing Statistics")
+    log_section("Post-Processing Statistics")
     log_metric("Raw Features", len(collected))
     collected = drop_unsupported_classes(collected)
     log_metric("After Class Filter", len(collected))
@@ -1923,10 +1860,9 @@ def predict(
     window_pixels: int = 48_000_000,
     seed: int = DEFAULT_SEED
 ) -> Dict[str, Any]:
-    """Оркестратор: пути → конфиг → модель → сбор фич → постобработка → GeoJSON."""
+    """Оркестратор: пути -> конфиг -> модель -> сбор фич -> постобработка -> GeoJSON."""
     pipeline_start_time = time.time()
-    log_header("🗿🔎 Archeology segmentation pipeline 🔎🗿", "═", 80)
-    logger.info("⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺⛏️🕵️‍♀️🏺")
+    log_header("Archeology segmentation pipeline")
 
     input_path, output_path, weights = _resolve_paths(input_dir, output_dir, model_path)
     cfg = RunConfig(
@@ -1978,19 +1914,19 @@ def predict(
     output_file, save_elapsed = _save_geojson(output_path, merged)
     log_timing("Save GeoJSON Time", save_elapsed)
 
-    log_section("✅ Processing Complete")
-    log_metric("Total Features", len(merged), "🎯")
-    log_metric("Output File", str(output_file), "💾")
+    log_section("Processing Complete")
+    log_metric("Total Features", len(merged))
+    log_metric("Output File", str(output_file))
 
     pipeline_elapsed = time.time() - pipeline_start_time
-    log_section("⏱️  Timing Summary")
+    log_section("Timing Summary")
     log_timing("Model Load", model_load_elapsed)
     log_timing("Region Processing", processing_elapsed)
     log_timing("Post-Processing",
                sum(timings.values()) + save_elapsed)
     log_timing("Total Pipeline Time", pipeline_elapsed)
 
-    log_header("Done!", "═", 80)
+    log_header("Done!")
 
     return {
         "total_features": len(merged),
