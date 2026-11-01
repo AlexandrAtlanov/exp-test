@@ -28,6 +28,8 @@ from shapely.errors import ShapelyError
 from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon, mapping, shape
 from shapely.geometry.base import BaseGeometry
 
+from . import config
+
 try:
     import config
 except ImportError:
@@ -332,7 +334,8 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
         return None, ("bad_feature",)
     props = feature.get("properties")
     props = props if isinstance(props, Mapping) else {}
-    cls = props.get("class")
+    cls = props.get("class_name")
+    fid = props.get("fid")
     markup_type = props.get("markup_type")
     confidence = props.get("confidence")
     region_name = props.get("region_name")
@@ -377,7 +380,7 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
 
     if _TRANSFORMER is not None:
         geom = shapely_transform(geom, _reproject)
-    elif not _warned_no_crs:
+    elif _SRC_CRS is None and not _warned_no_crs:
         _warned_no_crs = True
         logger.warning("SRC_CRS не задана в config — считаю геометрии уже в EPSG:3857")
 
@@ -400,15 +403,18 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
         if geom is None or geom.is_empty or geom.area <= 0:
             return None, ("bad_geometry",)
 
+    properties: dict[str, Any] = {
+        "class_name": cls,
+        "markup_type": markup_type,
+        "confidence": round(float(confidence), 6),
+        "region_name": region_name,
+    }
+    if isinstance(fid, str) and fid:
+        properties["fid"] = fid
     prepared = {
         "type": "Feature",
         "geometry": mapping(geom),
-        "properties": {
-            "class": cls,
-            "markup_type": markup_type,
-            "confidence": round(float(confidence), 6),
-            "region_name": region_name,
-        },
+        "properties": properties,
     }
     return prepared, ()
 
@@ -433,7 +439,7 @@ def _cap_features(
         return []
     by_class: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for feature in prepared:
-        by_class[feature["properties"]["class"]].append(feature)
+        by_class[feature["properties"]["class_name"]].append(feature)
     k = len(by_class)
     if k >= cap:
         kept = sorted(prepared, key=_feature_confidence, reverse=True)[:cap]
@@ -451,7 +457,7 @@ def _cap_features(
         kept.sort(key=_feature_confidence, reverse=True)
     kept_ids = {id(f) for f in kept}
     cut_by_class = Counter(
-        f["properties"]["class"] for f in prepared if id(f) not in kept_ids
+        f["properties"]["class_name"] for f in prepared if id(f) not in kept_ids
     )
     logger.warning(
         "обрезка (%s): %d -> %d фич; срезано по классам: %s",
@@ -537,7 +543,7 @@ def write_result(
         written=len(prepared),
         size_mb=round(size / 2**20, 2),
         seconds=round(time.perf_counter() - t0, 2),
-        classes=dict(Counter(f["properties"]["class"] for f in prepared)),
+        classes=dict(Counter(f["properties"]["class_name"] for f in prepared)),
     )
     last_stats = stats
     logger.info("write_result -> %s: %s", result, stats)

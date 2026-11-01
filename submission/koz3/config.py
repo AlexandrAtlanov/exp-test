@@ -24,6 +24,8 @@ ENABLED_DETECTORS: tuple[str, ...] = ()
 DEFAULT_CONF_THRESHOLD: float = 0.25
 """Порог уверенности для пар (class_name, markup_type) без своей записи."""
 
+SRC_CRS: str = "EPSG:3857"
+
 # Заглушка: рабочие пороги подбираются
 CONF_THRESHOLD: dict[tuple[str, str], float] = {}
 """Пороги по парам (class_name, markup_type) для postprocess."""
@@ -73,6 +75,8 @@ POINT_VERTICES: int = 32
 
 COORD_DECIMALS: int = 3
 """Знаков после запятой в координатах EPSG:3857 (инвариант 4.3)."""
+
+COORD_PRECISION: int = COORD_DECIMALS
 
 MAX_FEATURES: int = 20000
 """Максимум объектов в выходном файле (инвариант 4.4); отбор по confidence."""

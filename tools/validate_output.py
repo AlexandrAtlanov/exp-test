@@ -37,8 +37,8 @@ logger = logging.getLogger("koz3.validate_output")
 MAX_FEATURES = 20_000
 MAX_RING_POSITIONS = 3_000
 SIZE_LIMIT_BYTES = 100 * 1024 * 1024
-POLYGONAL = {"Polygon", "MultiPolygon"}
-POINTAL = {"Point", "MultiPoint"}
+POLYGONAL = {"Polygon"}
+POINTAL = {"Point"}
 
 
 def _iter_rings(geometry: dict[str, Any]) -> list[list[list[float]]]:
@@ -98,7 +98,7 @@ def feature_defects(feature: Any) -> list[str]:
     props = feature.get("properties")
     if not isinstance(props, dict):
         return ["bad_properties"]
-    if props.get("class") not in CLASSES:
+    if props.get("class_name") not in CLASSES:
         defects.append("bad_class")
     if props.get("markup_type") not in MARKUP_TYPES:
         defects.append("bad_markup_type")
@@ -155,7 +155,7 @@ def validate(path: str | Path) -> dict[str, Any]:
         report["examples"] = examples
     report["classes"] = dict(
         Counter(
-            f.get("properties", {}).get("class", "?")
+            f.get("properties", {}).get("class_name", "?")
             for f in features
             if isinstance(f, dict)
         )
