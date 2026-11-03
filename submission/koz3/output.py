@@ -30,11 +30,6 @@ from shapely.geometry.base import BaseGeometry
 
 from . import config
 
-try:
-    import config
-except ImportError:
-    config = None
-
 logger = logging.getLogger("koz3.output")
 
 def _cfg(*names: str, default: Any = None) -> Any:
@@ -111,7 +106,9 @@ def resolve_output_path(path: str | os.PathLike[str] | None = None) -> Path:
         result = Path("result.geojson")
     else:
         result = Path(path).expanduser()
-        if result.is_dir():
+        # Правило CLI (инвариант 7): *.geojson — файл, иначе директория,
+        # даже если её ещё нет.
+        if result.suffix.lower() != ".geojson":
             result = result / "result.geojson"
     parent = result.parent
     if parent.exists() and not parent.is_dir():  # Д12
@@ -371,9 +368,9 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
     if geom.has_z:
         geom = force_2d(geom)
 
-    if isinstance(geom, (Point, MultiPoint)):
-        pass
-    elif isinstance(geom, (Polygon, MultiPolygon)):
+    # Инвариант 1: на выход только Polygon. Точки детекторы превращают в
+    # круги сами (geometry.point_to_circle), здесь они — ошибка контракта.
+    if isinstance(geom, (Polygon, MultiPolygon)):
         geom = _strip_interiors(geom)
     else:
         return None, ("bad_geometry_type",)
@@ -402,6 +399,9 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
         geom = _fix_valid(geom)
         if geom is None or geom.is_empty or geom.area <= 0:
             return None, ("bad_geometry",)
+        geom = _largest_polygon(geom)
+        if geom is None:
+            return None, ("bad_geometry",)
 
     properties: dict[str, Any] = {
         "class_name": cls,
@@ -409,7 +409,8 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
         "confidence": round(float(confidence), 6),
         "region_name": region_name,
     }
-    if isinstance(fid, str) and fid:
+    # fid по ТР — целое число (справочное поле); прочие значения не пишем.
+    if isinstance(fid, int) and not isinstance(fid, bool):
         properties["fid"] = fid
     prepared = {
         "type": "Feature",
@@ -417,6 +418,14 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
         "properties": properties,
     }
     return prepared, ()
+
+def _largest_polygon(geom: BaseGeometry) -> Polygon | None:
+    """Самая большая часть-Polygon (метрика всё равно берёт только её)."""
+    if isinstance(geom, Polygon):
+        return geom
+    parts = [g for g in getattr(geom, "geoms", ()) if isinstance(g, Polygon) and g.area > 0]
+    return max(parts, key=lambda g: g.area) if parts else None
+
 
 def _feature_confidence(feature: Mapping) -> float:
     return float(feature["properties"]["confidence"])
@@ -508,6 +517,11 @@ def write_result(
     global last_stats
     t0 = time.perf_counter()
     result = resolve_output_path(output_path)
+    # solution.py создаёт новые словари фич на каждом чекпоинте, поэтому кэш
+    # по id() между вызовами не попадает, а только копит память. Чистим.
+    _prepared_cache.clear()
+    _pinned.clear()
+    _json_cache.clear()
 
     feature_list = list(features) if features is not None else []
     prepared: list[dict[str, Any]] = []

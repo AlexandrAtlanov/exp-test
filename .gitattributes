@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.ipynb text eol=lf
+*.pt binary
+*.engine binary
+*.tif binary

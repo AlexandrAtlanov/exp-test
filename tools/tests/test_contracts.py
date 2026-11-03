@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import sys
 from pathlib import Path
 
@@ -182,13 +181,8 @@ def test_full_pipeline_validator_clean(tmp_path):
     assert all(set(p) == _PROP_KEYS for p in props)
 
     fids = [p["fid"] for p in props]
+    assert all(isinstance(fid, int) for fid in fids)  # по ТР fid — целое
     assert len(fids) == len(set(fids))
-    assert all(re.fullmatch(rf"{REGION_NAME}:(li|or|maggr):\d+", fid) for fid in fids)
-    for markup in ("li", "or", "maggr"):  # нумерация в паре сплошная, с 1
-        numbers = sorted(
-            int(fid.rsplit(":", 1)[1]) for fid in fids if f":{markup}:" in fid
-        )
-        assert numbers == list(range(1, len(numbers) + 1))
 
     li_first = [p for p in props if p["class_name"] == first_cls and p["markup_type"] == "li"]
     or_first = [p for p in props if p["class_name"] == first_cls and p["markup_type"] == "or"]

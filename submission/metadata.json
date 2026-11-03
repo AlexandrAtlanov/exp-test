@@ -1,0 +1,4 @@
+{
+    "image": "wooferclaw/archeology:latest",
+    "entry_point": "python solution.py"
+}  

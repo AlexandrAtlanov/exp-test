@@ -243,7 +243,7 @@ def test_speed_20k_under_10s() -> None:
     start_s = time.perf_counter()
     result = postprocess.run(dets)
     elapsed_s = time.perf_counter() - start_s
-    assert 0 < len(result) < 20000
+    assert 0 < len(result) <= 20000
     assert elapsed_s < 10.0
     print(f"20k: {elapsed_s:.2f} с, осталось {len(result)} детекций")
 

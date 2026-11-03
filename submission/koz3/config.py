@@ -86,8 +86,41 @@ MAX_RING_VERTICES: int = 3000
 
 LIDAR: dict[str, object] = {
     "res_m": 0.1,
+    "max_pixels": 60_000_000,  # как в бейзлайне: больше — шаг DEM увеличивается
     "hillshades": ("c", "ch", "g", "i"),
     "tile_px": 1024,
     "overlap": 0.3,
 }
 """Параметры лидарного детектора: DEM, хиллшейды, нарезка на тайлы."""
+
+
+# ---------------------------------------------------------------------------
+# Модель сегментации (YOLO-seg) для лидара и снимков: обучение + инференс.
+# Один источник правды для training/ и koz3/yolo_runtime.py.
+# ---------------------------------------------------------------------------
+
+SURFACE_CLASSES: tuple[str, ...] = (
+    "kurgany_tselye",
+    "kurgany_povrezhdennye",
+    "gorodishcha",
+    "fortifikatsii",
+    "arkhitektury",
+)
+"""Классы модели по поверхностным данным (li, ae, sp_or, or); порядок = id класса YOLO."""
+
+YOLO: dict[str, object] = {
+    "weights_pt": "lidar_yolo.pt",
+    "weights_engine": "lidar_yolo.engine",
+    "prefer_engine": True,  # TensorRT engine, если есть файл и совместимая среда
+    "imgsz": 1024,
+    "half": True,  # FP16 для .pt; engine уже собран в FP16
+    "batch": 8,  # тайлов за вызов predict (engine с batch=1 гоняется по одному)
+    "conf": 0.05,  # низкий порог модели; рабочие пороги — CONF_THRESHOLD в postprocess
+    "iou": 0.5,  # NMS внутри тайла
+    "max_det": 300,
+    "mask_threshold": 0.5,
+}
+"""Параметры инференса YOLO-seg; веса лежат в WEIGHTS_DIR."""
+
+HILLSHADE_NODATA: dict[str, int] = {"c": 0, "ch": 0, "g": 255, "i": 255}
+"""Значение «нет данных» в хиллшейдах бейзлайна: цветные — 0, серые — 255."""

@@ -122,7 +122,7 @@ def _load_detectors() -> list[ModuleType]:
 def _to_features(
     detections: list[Detection], regions: dict[str, Region]
 ) -> list[dict]:
-    """Детекции (UTM региона) → GeoJSON-фичи в OUTPUT_CRS; fid=регион:тип:n.
+    """Детекции (UTM региона) → GeoJSON-фичи в OUTPUT_CRS; fid — сквозной номер.
 
     Детекция с region_name, которого нет среди регионов, пропускается с
     logger.error. confidence не клипуется и координаты не округляются:
@@ -130,14 +130,11 @@ def _to_features(
     округление координат output тоже делает сам (COORD_PRECISION).
     """
     features: list[dict] = []
-    counters: dict[tuple[str, str], int] = {}
     for det in detections:
         region = regions.get(det.region_name)
         if region is None:
             logger.error("неизвестный регион %r — детекция пропущена", det.region_name)
             continue
-        key = (det.region_name, det.markup_type)
-        counters[key] = counters.get(key, 0) + 1
         geom = geometry.reproject(det.geom, region.utm_crs, OUTPUT_CRS)
         features.append(
             {
@@ -147,7 +144,7 @@ def _to_features(
                     "confidence": float(det.confidence),
                     "markup_type": det.markup_type,
                     "region_name": det.region_name,
-                    "fid": f"{det.region_name}:{det.markup_type}:{counters[key]}",
+                    "fid": len(features),
                 },
                 "geometry": mapping(geom),
             }

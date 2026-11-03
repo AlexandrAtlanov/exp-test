@@ -10,9 +10,9 @@ from functools import lru_cache
 
 from affine import Affine
 import numpy as np
+import shapely
 from pyproj import Transformer
 from rasterio import features
-from shapely import ops
 from shapely.geometry import Polygon, shape
 from shapely.validation import make_valid
 
@@ -49,7 +49,7 @@ def mask_to_polygons(mask: np.ndarray, transform: Affine) -> list[Polygon]:
 def reproject(geom: Polygon, src_crs: str, dst_crs: str) -> Polygon:
     """Перевести полигон из src_crs в dst_crs; оси x, y (always_xy=True)."""
     transformer = _transformer(src_crs, dst_crs)
-    return ops.transform(transformer.transform, geom)
+    return shapely.transform(geom, transformer.transform, interleaved=False)
 
 
 def point_to_circle(x: float, y: float) -> Polygon:
