@@ -18,7 +18,7 @@ WEIGHTS_DIR: Path = Path(__file__).resolve().parent.parent / "weights"
 LOG_LEVEL: str = "INFO"
 """Уровень logging в solution.py."""
 
-ENABLED_DETECTORS: tuple[str, ...] = ()
+ENABLED_DETECTORS: tuple[str, ...] = ("lidar",)
 """Имена модулей-детекторов из koz3.detectors; заполняется по мере готовности."""
 
 DEFAULT_CONF_THRESHOLD: float = 0.25
@@ -86,18 +86,14 @@ MAX_RING_VERTICES: int = 3000
 
 LIDAR: dict[str, object] = {
     "res_m": 0.1,
-    "max_pixels": 60_000_000,  # как в бейзлайне: больше — шаг DEM увеличивается
+    "max_pixels": 60_000_000,  # как в бейзлайне
     "hillshades": ("c", "ch", "g", "i"),
+    "infer_hillshades": ("c", "ch", "g", "i"),  # отмывки для инференса
     "tile_px": 1024,
     "overlap": 0.3,
+    "seconds_per_gb": 60.0,  # оценка: секунд на ГБ LAS
 }
 """Параметры лидарного детектора: DEM, хиллшейды, нарезка на тайлы."""
-
-
-# ---------------------------------------------------------------------------
-# Модель сегментации (YOLO-seg) для лидара и снимков: обучение + инференс.
-# Один источник правды для training/ и koz3/yolo_runtime.py.
-# ---------------------------------------------------------------------------
 
 SURFACE_CLASSES: tuple[str, ...] = (
     "kurgany_tselye",
