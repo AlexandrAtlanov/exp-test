@@ -48,6 +48,13 @@ def canonical_class(raw: str | None) -> str | None:
             return settings.CLASS_SYNONYMS[synonym]
     return None
 
+def _props_ignored(props: dict[str, object]) -> bool:
+    """True, если классоподобное свойство — класс из игнор-листа."""
+    for key in settings.CLASS_PROPERTY_KEYS:
+        raw = props.get(key)
+        if raw is not None and normalize_name(str(raw)) in settings.IGNORED_CLASSES:
+            return True
+    return False
 
 def markup_type_from_name(path: Path) -> str | None:
     """Тип данных по меткам в имени файла (Li/La/Ae/SpOr/Or)."""
@@ -85,7 +92,9 @@ def load_objects(
     """
     data = json.loads(ann.path.read_text(encoding="utf-8"))
     file_class = canonical_class(ann.path.stem)
+    stem_ignored = any(name in normalize_name(ann.path.stem) for name in settings.IGNORED_CLASSES)
     transformer = None
+
     if CRS.from_user_input(ann.crs) != CRS.from_user_input(dst_crs):
         transformer = Transformer.from_crs(ann.crs, dst_crs, always_xy=True)
     objects = []
@@ -93,8 +102,10 @@ def load_objects(
         geom_dict = feature.get("geometry")
         if not geom_dict or not geom_dict.get("coordinates"):
             continue
-        class_name = file_class
         props = feature.get("properties") or {}
+        if stem_ignored or _props_ignored(props):
+            continue
+        class_name = file_class
         for key in settings.CLASS_PROPERTY_KEYS:
             if props.get(key) is not None and canonical_class(props[key]):
                 class_name = canonical_class(props[key])

@@ -66,7 +66,14 @@ CLASS_SYNONYMS: dict[str, str] = {
 # Поля properties, в которых может лежать имя класса (по порядку проверки).
 CLASS_PROPERTY_KEYS: tuple[str, ...] = ("class_name", "class", "Class", "name", "layer", "type")
 
+IGNORED_CLASSES: tuple[str, ...] = ("structrpoly", "structpoly", "structurepoly")
+"""Классы-«структуры», не входящие в 7 канонических (игнор-лист как в метрике
+организаторов): load_objects пропускает фичи, у которых значение
+классоподобного свойства или имя файла (нормализованные) содержат одно
+из этих имён."""
+
 MARKUP_LABELS: dict[str, str] = {
+
     "li": "li",
     "la": "li",
     "ae": "ae",
