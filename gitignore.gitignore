@@ -1,0 +1,16 @@
+data/
+*.las
+*.laz
+*.tif
+*.tiff
+hillshade_cache/
+runs/
+weights_out/
+submission/weights/*
+*.pt
+*.engine
+*.zip
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
