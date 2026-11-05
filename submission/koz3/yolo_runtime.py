@@ -141,7 +141,8 @@ def load_model(weights_dir: Path | None = None) -> LoadedModel:
 def predict_tiles(loaded: LoadedModel, tiles: list[np.ndarray]) -> Iterator[list[TileInstance]]:
     """Предсказать маски для тайлов RGB uint8; по одному списку на тайл, в том же порядке.
 
-    Классы модели, которых нет в config.SURFACE_CLASSES, отбрасываются.
+    Имена классов модели переводятся через config.MODEL_CLASS_ALIASES; классы,
+    которых и после этого нет в config.SURFACE_CLASSES, отбрасываются.
     """
     import torch
 
@@ -181,7 +182,8 @@ def _instances(
     surface = set(config.SURFACE_CLASSES)
     found: list[TileInstance] = []
     for mask, class_id, conf in zip(masks, classes, confs, strict=True):
-        class_name = names.get(int(class_id), "")
+        raw_name = names.get(int(class_id), "")
+        class_name = config.MODEL_CLASS_ALIASES.get(raw_name, raw_name)
         if class_name not in surface:
             continue
         found.append(TileInstance(class_name, float(conf), mask[:height, :width]))
