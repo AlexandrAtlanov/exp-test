@@ -29,7 +29,8 @@ def run(detections: list[Detection]) -> list[Detection]:
     площадь → NMS внутри (class_name, markup_type) → упрощение колец →
     лимит числа объектов по confidence. Возвращает новый список детекций;
     порядок выхода детерминирован: группы по возрастанию ключа
-    (class_name, markup_type), внутри группы — убывание confidence.
+    (class_name, markup_type), внутри группы — целые раньше обрезанных краем
+    тайла, затем убывание confidence.
     """
     n_input = len(detections)
     thresholded = _filter_threshold(detections)
@@ -50,9 +51,7 @@ def run(detections: list[Detection]) -> list[Detection]:
 
 def _threshold_for(class_name: str, markup_type: str) -> float:
     """Вернуть порог уверенности для пары (class_name, markup_type)."""
-    return config.CONF_THRESHOLD.get(
-        (class_name, markup_type), config.DEFAULT_CONF_THRESHOLD
-    )
+    return config.CONF_THRESHOLD.get((class_name, markup_type), config.DEFAULT_CONF_THRESHOLD)
 
 
 def _filter_threshold(detections: list[Detection]) -> list[Detection]:
@@ -100,15 +99,16 @@ def _nms(detections: list[Detection]) -> list[Detection]:
 
 
 def _nms_group(group: list[Detection]) -> list[Detection]:
-    """Жадный NMS одной группы по убыванию confidence, кандидаты из STRtree.
+    """Жадный NMS одной группы: сначала целые, затем по убыванию confidence.
 
-    STRtree.query с предикатом intersects даёт кандидатов на подавление
-    (bbox-префильтр + точная проверка пересечения); подавляется только
-    менее уверенная детекция, при равных confidence — идущая позже
-    в исходном порядке. Возвращает выжившие детекции в порядке убывания
-    confidence.
+    Детекции с extra["edge_cut"] (маска обрезана внутренним краем тайла)
+    идут после целых: иначе обрезок объекта с соседнего тайла подавил бы
+    целую копию. Обрезок выживает, только если целой копии нет (объект
+    крупнее перекрытия тайлов). STRtree.query с предикатом intersects даёт
+    кандидатов на подавление; подавляется идущая позже в этом порядке
+    (при равных ключах — позже в исходном порядке).
     """
-    ordered = sorted(group, key=lambda det: -det.confidence)
+    ordered = sorted(group, key=_nms_order)
     geoms = [det.geom for det in ordered]
     areas_m2 = [geom.area for geom in geoms]
     tree = STRtree(geoms)
@@ -122,6 +122,11 @@ def _nms_group(group: list[Detection]) -> list[Detection]:
             if _suppress_pair(geoms[i], geoms[j], areas_m2[i], areas_m2[j]):
                 suppressed[j] = True
     return [det for det, flag in zip(ordered, suppressed) if not flag]
+
+
+def _nms_order(det: Detection) -> tuple[bool, float]:
+    """Ключ порядка NMS: целые раньше обрезанных краем тайла, затем confidence."""
+    return bool(det.extra.get("edge_cut", False)), -det.confidence
 
 
 def _suppress_pair(

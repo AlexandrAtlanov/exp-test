@@ -1,0 +1,11 @@
+# Настройки ruff для всего репозитория (PEP 8, строка до 99 символов).
+line-length = 99
+target-version = "py312"
+extend-exclude = ["tools/compute_metrics.py"]  # копия метрики организаторов, не правим
+
+[lint]
+select = ["E", "F", "W", "I"]
+
+[lint.isort]
+# свои модули: пакет решения и инструменты/обучение (их пути добавляет _bootstrap)
+known-first-party = ["koz3", "solution", "settings", "annotations", "make_gt", "validate_output"]

@@ -10,12 +10,11 @@ markup_type «li», формат source «<las>:<отмывка>», устойч
 import logging
 from pathlib import Path
 
+import _bootstrap  # noqa: F401  # добавляет submission/ в sys.path
 import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import Affine
-
-import _bootstrap  # noqa: F401  # добавляет submission/ в sys.path
 
 from koz3 import config, geometry, yolo_runtime
 from koz3.datatypes import Detection, Region
@@ -251,9 +250,7 @@ def test_run_happy_path_detections_in_utm(tmp_path, monkeypatch, fresh_detector)
     assert det.geom.centroid.y == pytest.approx(5999992.0)
 
 
-def test_run_source_covers_all_hillshade_variants(
-    tmp_path, monkeypatch, fresh_detector
-):
+def test_run_source_covers_all_hillshade_variants(tmp_path, monkeypatch, fresh_detector):
     """Source различает отмывки: «<las>:c», «:ch», «:g», «:i» (голосование T5)."""
     monkeypatch.setitem(config.LIDAR, "infer_hillshades", ("c", "ch", "g", "i"))
     region, las_paths = _make_region(tmp_path, ["site_ground.las"])
@@ -276,9 +273,7 @@ def test_run_source_covers_all_hillshade_variants(
     assert all(det.markup_type == "li" for det in detections)
 
 
-def test_run_keeps_duplicates_from_tile_overlap(
-    tmp_path, monkeypatch, fresh_detector
-):
+def test_run_keeps_duplicates_from_tile_overlap(tmp_path, monkeypatch, fresh_detector):
     """Дубли от перекрытия тайлов не подавляются — это дело postprocess."""
     region, las_paths = _make_region(tmp_path, ["ground.las"])
     _find_las_stub(monkeypatch, las_paths)
@@ -300,6 +295,30 @@ def test_run_keeps_duplicates_from_tile_overlap(
     centroids = sorted(det.geom.centroid.x for det in detections)
     assert centroids[0] == pytest.approx(centroids[1])  # одно место в мире
     assert centroids[0] == pytest.approx(500000.0 + 2.0 * 12.0)
+
+
+def test_run_marks_masks_cut_by_inner_tile_edge(tmp_path, monkeypatch, fresh_detector):
+    """edge_cut = True только у маски на внутреннем крае тайла, не на крае растра."""
+    region, las_paths = _make_region(tmp_path, ["ground.las"])
+    _find_las_stub(monkeypatch, las_paths)
+    _hillshade_stub(monkeypatch, REGION_CRS, UTM_TRANSFORM, width=24, height=24)
+    _load_stub(monkeypatch)
+    # тайлы 16 px: (0,0), (0,8), (8,0), (8,8); растр 24 x 24
+    _predict_stub(
+        monkeypatch,
+        [
+            [
+                TileInstance("kurgany_tselye", 0.9, _blob_mask(TILE_PX, 2, 2)),  # внутри
+                TileInstance("gorodishcha", 0.9, _blob_mask(TILE_PX, 2, 12)),  # край 16 < 24
+            ],
+            [TileInstance("arkhitektury", 0.9, _blob_mask(TILE_PX, 2, 12))],  # край растра
+        ],
+    )
+
+    detections = lidar.run(region, Budget(600), config)
+
+    cut = {det.class_name: det.extra["edge_cut"] for det in detections}
+    assert cut == {"kurgany_tselye": False, "gorodishcha": True, "arkhitektury": False}
 
 
 def test_run_crops_mask_to_real_tile_area(tmp_path, monkeypatch, fresh_detector):
@@ -347,9 +366,7 @@ def test_run_reprojects_from_foreign_crs(tmp_path, monkeypatch, fresh_detector):
     assert 5_000_000 < centroid.y < 7_000_000
 
 
-def test_run_zero_budget_returns_empty_without_error(
-    tmp_path, monkeypatch, fresh_detector
-):
+def test_run_zero_budget_returns_empty_without_error(tmp_path, monkeypatch, fresh_detector):
     """Бюджет 0: пустой список, без исключений, модель не загружается."""
     region, las_paths = _make_region(tmp_path, ["ground.las"])
     _find_las_stub(monkeypatch, las_paths)
@@ -389,9 +406,7 @@ def test_run_stops_between_hillshades_when_budget_out(
     assert "не покрывает отмывку ch" in caplog.text
 
 
-def test_run_one_las_error_does_not_stop_others(
-    tmp_path, monkeypatch, fresh_detector, caplog
-):
+def test_run_one_las_error_does_not_stop_others(tmp_path, monkeypatch, fresh_detector, caplog):
     """Ошибка одного LAS логируется, остальные LAS обрабатываются."""
     region, las_paths = _make_region(tmp_path, ["good.las", "bad.las"])
     _find_las_stub(monkeypatch, las_paths)
@@ -409,9 +424,7 @@ def test_run_one_las_error_does_not_stop_others(
     assert "bad.las" in caplog.text
 
 
-def test_run_model_load_failure_returns_empty(
-    tmp_path, monkeypatch, fresh_detector, caplog
-):
+def test_run_model_load_failure_returns_empty(tmp_path, monkeypatch, fresh_detector, caplog):
     """Модель не загрузилась: пустой результат, прогон не падает."""
     region, las_paths = _make_region(tmp_path, ["ground.las"])
     _find_las_stub(monkeypatch, las_paths)
@@ -443,9 +456,7 @@ def test_run_loads_model_once_for_all_las(tmp_path, monkeypatch, fresh_detector)
     assert len(load_calls) == 1
 
 
-def test_run_skips_missing_hillshade_variant(
-    tmp_path, monkeypatch, fresh_detector, caplog
-):
+def test_run_skips_missing_hillshade_variant(tmp_path, monkeypatch, fresh_detector, caplog):
     """Отмывка не построена или не сопоставлена: предупреждение, остальные идут."""
     monkeypatch.setitem(config.LIDAR, "infer_hillshades", ("c", "g"))
     region, las_paths = _make_region(tmp_path, ["ground.las"])

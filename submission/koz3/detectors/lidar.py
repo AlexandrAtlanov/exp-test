@@ -4,7 +4,9 @@
 режет каждую инференс-отмывку на тайлы с перекрытием, предсказывает маски
 и переводит их в полигоны в UTM региона. Дубли от перекрытия тайлов и от
 нескольких отмывок здесь не подавляются — это делает postprocess по парам
-(class_name, markup_type).
+(class_name, markup_type). Маски, обрезанные внутренним краем тайла, помечаются
+extra["edge_cut"] = True: NMS предпочитает им целые копии того же объекта из
+соседнего тайла.
 """
 
 import logging
@@ -198,8 +200,7 @@ def _process_las(
                 continue
             if not budget.can_afford(per_variant_estimate_s):
                 logger.warning(
-                    "li %s: бюджет %.0f с не покрывает отмывку %s (%s), "
-                    "возвращаю найденное (%d)",
+                    "li %s: бюджет %.0f с не покрывает отмывку %s (%s), возвращаю найденное (%d)",
                     region.name,
                     budget.remaining(),
                     variant,
@@ -209,7 +210,12 @@ def _process_las(
                 break
             try:
                 new_detections = _predict_hillshade(
-                    region, las_path, tif_path, variant, model, cfg,
+                    region,
+                    las_path,
+                    tif_path,
+                    variant,
+                    model,
+                    cfg,
                 )
             except Exception:  # noqa: BLE001  # одна отмывка не роняет весь LAS
                 logger.exception(
@@ -318,6 +324,7 @@ def _predict_hillshade(
         )
         return []
     image = yolo_runtime.to_model_image(raster)
+    raster_height, raster_width = image.shape[:2]
     tiles = _make_tiles(image, int(cfg.LIDAR["tile_px"]), float(cfg.LIDAR["overlap"]))
     detections: list[Detection] = []
     predicted = yolo_runtime.predict_tiles(model, [tile.image for tile in tiles])
@@ -327,6 +334,7 @@ def _predict_hillshade(
             mask = inst.mask[: tile.height, : tile.width]
             if not mask.any():
                 continue
+            edge_cut = _touches_inner_edge(mask, tile, raster_height, raster_width)
             for geom in geometry.mask_to_polygons(mask, tile_transform):
                 detections.append(
                     Detection(
@@ -336,6 +344,7 @@ def _predict_hillshade(
                         markup_type=MARKUP_TYPE,
                         region_name=region.name,
                         source=f"{las_path.name}:{variant}",
+                        extra={"edge_cut": edge_cut},
                     )
                 )
     logger.info(
@@ -348,6 +357,20 @@ def _predict_hillshade(
         time.monotonic() - started_s,
     )
     return detections
+
+
+def _touches_inner_edge(mask: np.ndarray, tile: _Tile, height: int, width: int) -> bool:
+    """Маска касается края тайла, который не совпадает с краем растра (объект обрезан).
+
+    mask уже обрезана до реального фрагмента (tile.height x tile.width);
+    height, width — размер всего растра отмывки, px.
+    """
+    return bool(
+        (tile.row0 > 0 and mask[0].any())
+        or (tile.col0 > 0 and mask[:, 0].any())
+        or (tile.row0 + tile.height < height and mask[-1].any())
+        or (tile.col0 + tile.width < width and mask[:, -1].any())
+    )
 
 
 def _to_region_crs(geom: Polygon, raster_crs: RasterCRS, region: Region) -> Polygon:

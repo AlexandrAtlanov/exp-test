@@ -197,10 +197,7 @@ def test_limit_features() -> None:
     try:
         xs_m = (0.0, 100.0, 200.0, 300.0, 400.0)
         confs = (0.30, 0.35, 0.40, 0.45, 0.50)
-        dets = [
-            _det(_square(x_m, 0.0, 10.0), conf=conf)
-            for x_m, conf in zip(xs_m, confs)
-        ]
+        dets = [_det(_square(x_m, 0.0, 10.0), conf=conf) for x_m, conf in zip(xs_m, confs)]
         result = postprocess.run(dets)
         assert len(result) == 3
         assert sorted(det.confidence for det in result) == [0.40, 0.45, 0.50]
@@ -216,6 +213,24 @@ def test_equal_confidence_keeps_first() -> None:
     assert len(result) == 1
     assert result[0].geom.equals(first.geom)
     assert not result[0].geom.equals(second.geom)
+
+
+def test_whole_object_beats_tile_edge_fragment() -> None:
+    """Целая копия объекта подавляет обрезок с края тайла, даже если обрезок увереннее."""
+    whole = _det(_square(0.0, 0.0, 10.0), conf=0.80)
+    fragment = _det(_square(0.0, 0.0, 6.0), conf=0.85)
+    fragment.extra["edge_cut"] = True
+    result = postprocess.run([fragment, whole])
+    assert len(result) == 1
+    assert result[0].geom.equals(whole.geom)
+
+
+def test_fragment_kept_when_no_whole_copy() -> None:
+    """Обрезок без целой копии (объект крупнее перекрытия тайлов) остаётся."""
+    fragment = _det(_square(0.0, 0.0, 6.0), conf=0.85)
+    fragment.extra["edge_cut"] = True
+    other = _det(_square(50.0, 0.0, 6.0), conf=0.9)
+    assert len(postprocess.run([fragment, other])) == 2
 
 
 def test_config_dicts_cover_all_classes() -> None:

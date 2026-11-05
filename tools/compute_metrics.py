@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Скрипт расчета итоговой метрики Archaeology Assistive F1 для КОЗ-3.
 
