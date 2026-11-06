@@ -33,8 +33,7 @@ HOT_TO_COLD_PHASE = 0.75
 #: Циклов у `c` (инструкция TerraModeler: «указываем 3»).
 DEFAULT_CYCLES_C = 3.0
 #: Байт classification в записи точки LAS: форматы 0–5 и 6–10 различаются.
-_LAS_CLASS_BYTE = {0: 15, 1: 15, 2: 15, 3: 15, 4: 15, 5: 15,
-                   6: 16, 7: 16, 8: 16, 9: 16, 10: 16}
+_LAS_CLASS_BYTE = {0: 15, 1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 16, 7: 16, 8: 16, 9: 16, 10: 16}
 #: Порядок и состав стандартного набора.
 HILLSHADE_MODALITIES = ("c", "ch", "g", "i")
 
@@ -42,7 +41,8 @@ HILLSHADE_MODALITIES = ("c", "ch", "g", "i")
 def find_las_files(region_dir: Path) -> List[Path]:
     """Все LAS/LAZ площадки; в каждой папке предпочитает отфильтрованный ground."""
     files = [
-        path for path in region_dir.rglob("*")
+        path
+        for path in region_dir.rglob("*")
         if path.is_file() and path.suffix.lower() in (".las", ".laz")
     ]
     if not files:
@@ -51,7 +51,9 @@ def find_las_files(region_dir: Path) -> List[Path]:
     for path in sorted(files):
         parent = path.parent
         current = chosen.get(parent)
-        if current is None or ("ground" in path.name.lower() and "ground" not in current.name.lower()):
+        if current is None or (
+            "ground" in path.name.lower() and "ground" not in current.name.lower()
+        ):
             chosen[parent] = path
     return list(chosen.values())
 
@@ -104,19 +106,23 @@ def _iter_las_chunks(path: Path, header: Dict[str, Any], chunk_points: int):
 
         with laspy.open(str(path)) as handle:
             for points in handle.chunk_iterator(chunk_points):
-                yield (np.asarray(points.x, dtype=np.float64),
-                       np.asarray(points.y, dtype=np.float64),
-                       np.asarray(points.z, dtype=np.float64),
-                       np.asarray(points.classification))
+                yield (
+                    np.asarray(points.x, dtype=np.float64),
+                    np.asarray(points.y, dtype=np.float64),
+                    np.asarray(points.z, dtype=np.float64),
+                    np.asarray(points.classification),
+                )
         return
     if point_format not in _LAS_CLASS_BYTE:
         raise RuntimeError(f"{path.name}: формат точек {point_format} не поддерживается")
-    dtype = np.dtype({
-        "names": ["x", "y", "z", "cls"],
-        "formats": ["<i4", "<i4", "<i4", "u1"],
-        "offsets": [0, 4, 8, _LAS_CLASS_BYTE[point_format]],
-        "itemsize": record_length,
-    })
+    dtype = np.dtype(
+        {
+            "names": ["x", "y", "z", "cls"],
+            "formats": ["<i4", "<i4", "<i4", "u1"],
+            "offsets": [0, 4, 8, _LAS_CLASS_BYTE[point_format]],
+            "itemsize": record_length,
+        }
+    )
     scale_x, scale_y, scale_z = header["scale"]
     off_x, off_y, off_z = header["offset"]
     remaining = header["point_count"]
@@ -133,10 +139,12 @@ def _iter_las_chunks(path: Path, header: Dict[str, Any], chunk_points: int):
             if point_format <= 5:
                 # форматы 0–5: класс занимает младшие 5 бит, старшие — флаги
                 classification = classification & 0x1F
-            yield (records["x"].astype(np.float64) * scale_x + off_x,
-                   records["y"].astype(np.float64) * scale_y + off_y,
-                   records["z"].astype(np.float64) * scale_z + off_z,
-                   classification)
+            yield (
+                records["x"].astype(np.float64) * scale_x + off_x,
+                records["y"].astype(np.float64) * scale_y + off_y,
+                records["z"].astype(np.float64) * scale_z + off_z,
+                classification,
+            )
             remaining -= count
 
 
@@ -150,23 +158,22 @@ def _fill_nan_pyramid(array: np.ndarray, max_levels: int = 16) -> np.ndarray:
         levels.append(current)
         pad_h, pad_w = current.shape[0] % 2, current.shape[1] % 2
         if pad_h or pad_w:
-            current = np.pad(current, ((0, pad_h), (0, pad_w)),
-                             mode="constant", constant_values=np.nan)
+            current = np.pad(
+                current, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan
+            )
         valid = np.isfinite(current)
         values = np.where(valid, current, 0.0).astype(np.float32)
-        counts = valid.reshape(current.shape[0] // 2, 2,
-                               current.shape[1] // 2, 2).sum(axis=(1, 3))
-        sums = values.reshape(current.shape[0] // 2, 2,
-                              current.shape[1] // 2, 2).sum(axis=(1, 3))
-        current = np.where(counts > 0, sums / np.maximum(counts, 1),
-                           np.nan).astype(np.float32)
+        counts = valid.reshape(current.shape[0] // 2, 2, current.shape[1] // 2, 2).sum(axis=(1, 3))
+        sums = values.reshape(current.shape[0] // 2, 2, current.shape[1] // 2, 2).sum(axis=(1, 3))
+        current = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan).astype(np.float32)
     finite = np.isfinite(current)
     if not finite.all():
         mean = float(current[finite].mean()) if finite.any() else 0.0
         current = np.where(finite, current, mean).astype(np.float32)
     for level in reversed(levels):
-        upscaled = cv2.resize(current, (level.shape[1], level.shape[0]),
-                              interpolation=cv2.INTER_LINEAR)
+        upscaled = cv2.resize(
+            current, (level.shape[1], level.shape[0]), interpolation=cv2.INTER_LINEAR
+        )
         current = np.where(np.isfinite(level), level, upscaled).astype(np.float32)
     return current
 
@@ -178,7 +185,7 @@ def _convex_hull_mask(valid: np.ndarray, max_points: int = 1_500_000) -> np.ndar
     if flat.size < 3:
         return valid.copy()
     if flat.size > max_points:
-        flat = flat[::int(math.ceil(flat.size / max_points))]
+        flat = flat[:: int(math.ceil(flat.size / max_points))]
     rows, cols = np.divmod(flat, width)
     points = np.column_stack([cols, rows]).astype(np.int32).reshape(-1, 1, 2)
     mask = np.zeros((height, width), np.uint8)
@@ -186,8 +193,9 @@ def _convex_hull_mask(valid: np.ndarray, max_points: int = 1_500_000) -> np.ndar
     return mask.astype(bool)
 
 
-def _fill_by_delaunay(dem: np.ndarray, valid: np.ndarray, to_fill: np.ndarray,
-                      max_vertices: int) -> Optional[np.ndarray]:
+def _fill_by_delaunay(
+    dem: np.ndarray, valid: np.ndarray, to_fill: np.ndarray, max_vertices: int
+) -> Optional[np.ndarray]:
     """Линейная интерполяция по Делоне (как `fill_holes` в хиллшейд-проекте)."""
     if int(np.count_nonzero(valid)) > max_vertices:
         return None
@@ -242,10 +250,15 @@ def fill_interior_holes(dem: np.ndarray, max_vertices: int = 4_000_000) -> np.nd
     return np.asarray(filled, dtype=np.float32)
 
 
-def build_dem_from_las(las_path: Path, res: float = 0.1, interp: str = "mean",
-                       ground_class: int = 2, use_all: bool = False,
-                       max_pixels: int = 60_000_000, chunk_points: int = 2_000_000
-                       ) -> Tuple[np.ndarray, Affine, Dict[str, Any]]:
+def build_dem_from_las(
+    las_path: Path,
+    res: float = 0.1,
+    interp: str = "mean",
+    ground_class: int = 2,
+    use_all: bool = False,
+    max_pixels: int = 60_000_000,
+    chunk_points: int = 2_000_000,
+) -> Tuple[np.ndarray, Affine, Dict[str, Any]]:
     """Строит регулярную модель рельефа из LAS потоково (память ~сетка DEM).
 
     Повторяет логику `make_dem` из хиллшейд-проекта: агрегация mean/max по
@@ -271,8 +284,9 @@ def build_dem_from_las(las_path: Path, res: float = 0.1, interp: str = "mean",
         res = res * factor
         left, bottom, width, height = _extent(res)
         if factor > 1:
-            logger.info("габариты дают слишком большой растр → шаг увеличен в %d× до %g м",
-                        factor, res)
+            logger.info(
+                "габариты дают слишком большой растр → шаг увеличен в %d× до %g м", factor, res
+            )
     transform = from_origin(left, bottom + height * res, res, res)
     top = transform.f
     cells = width * height
@@ -287,8 +301,11 @@ def build_dem_from_las(las_path: Path, res: float = 0.1, interp: str = "mean",
             unique, freq = np.unique(classification, return_counts=True)
             for value, amount in zip(unique, freq):
                 classes[int(value)] = classes.get(int(value), 0) + int(amount)
-            mask = np.ones(classification.shape, dtype=bool) if use_all_points \
+            mask = (
+                np.ones(classification.shape, dtype=bool)
+                if use_all_points
                 else (classification == ground_class)
+            )
             if not mask.any():
                 continue
             x, y, z = x[mask], y[mask], z[mask]
@@ -313,8 +330,9 @@ def build_dem_from_las(las_path: Path, res: float = 0.1, interp: str = "mean",
 
     sums, counts, peaks, classes, selected = _accumulate(use_all)
     if selected == 0 and not use_all:
-        logger.warning("      класса %s в файле нет (есть %s) → берём все точки",
-                       ground_class, classes)
+        logger.warning(
+            "      класса %s в файле нет (есть %s) → берём все точки", ground_class, classes
+        )
         del sums, counts, peaks
         sums, counts, peaks, classes, selected = _accumulate(True)
     if selected == 0:
@@ -341,18 +359,25 @@ def build_dem_from_las(las_path: Path, res: float = 0.1, interp: str = "mean",
     return dem, transform, stats
 
 
-def hillshade_esri(dem: np.ndarray, res_x: float, res_y: float,
-                   azimuth: float = 315.0, altitude: float = 45.0,
-                   z_factor: float = 1.0) -> np.ndarray:
+def hillshade_esri(
+    dem: np.ndarray,
+    res_x: float,
+    res_y: float,
+    azimuth: float = 315.0,
+    altitude: float = 45.0,
+    z_factor: float = 1.0,
+) -> np.ndarray:
     """Классическая формула ESRI/ArcGIS «Отмывка» (Hillshade)."""
-    gy_north = -np.gradient(dem, res_y, axis=0)   # ось 0 — строки, вниз = юг
-    gx_east = np.gradient(dem, res_x, axis=1)     # ось 1 — столбцы, вправо = восток
+    gy_north = -np.gradient(dem, res_y, axis=0)  # ось 0 — строки, вниз = юг
+    gx_east = np.gradient(dem, res_x, axis=1)  # ось 1 — столбцы, вправо = восток
     slope = np.arctan(np.hypot(gx_east, gy_north) * z_factor)
     aspect = np.arctan2(-gx_east, -gy_north)
     zenith = math.radians(90.0 - altitude)
     azimuth_rad = math.radians(azimuth)
-    shade = 255.0 * (math.cos(zenith) * np.cos(slope)
-                     + math.sin(zenith) * np.sin(slope) * np.cos(azimuth_rad - aspect))
+    shade = 255.0 * (
+        math.cos(zenith) * np.cos(slope)
+        + math.sin(zenith) * np.sin(slope) * np.cos(azimuth_rad - aspect)
+    )
     return np.clip(shade, 0.0, 255.0)
 
 
@@ -372,18 +397,32 @@ def hsv_to_rgb_u8(hue: np.ndarray, sat: np.ndarray, val: np.ndarray) -> np.ndarr
     return np.clip(np.rint(rgb * 255.0), 0, 255).astype(np.uint8)
 
 
-def _open_writer(path: Path, height: int, width: int, count: int,
-                 transform: Affine, crs) -> "rasterio.io.DatasetWriter":
+def _open_writer(
+    path: Path, height: int, width: int, count: int, transform: Affine, crs
+) -> "rasterio.io.DatasetWriter":
     profile = {
-        "driver": "GTiff", "height": height, "width": width, "count": count,
-        "dtype": "uint8", "transform": transform, "crs": crs,
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": count,
+        "dtype": "uint8",
+        "transform": transform,
+        "crs": crs,
     }
     return rasterio.open(path, "w", **profile)
 
 
-def _write_gray_pair(out_dir: Path, name: str, filled: np.ndarray, valid: np.ndarray,
-                     step: float, transform: Affine, crs, tags: Iterable[str],
-                     block_rows: int = 4096) -> List[Path]:
+def _write_gray_pair(
+    out_dir: Path,
+    name: str,
+    filled: np.ndarray,
+    valid: np.ndarray,
+    step: float,
+    transform: Affine,
+    crs,
+    tags: Iterable[str],
+    block_rows: int = 4096,
+) -> List[Path]:
     """Серая и/или инвертированная отмывка (ArcGIS 315°/45°, Z = 1) по блокам строк."""
     tags = [tag for tag in ("g", "i") if tag in set(tags)]
     if not tags:
@@ -394,9 +433,9 @@ def _write_gray_pair(out_dir: Path, name: str, filled: np.ndarray, valid: np.nda
     try:
         for top in range(0, height, block_rows):
             bottom = min(top + block_rows, height)
-            lo, hi = max(0, top - 1), min(height, bottom + 1)   # halo для градиента
+            lo, hi = max(0, top - 1), min(height, bottom + 1)  # halo для градиента
             shade = np.rint(hillshade_esri(filled[lo:hi], step, step)).astype(np.uint8)
-            shade = shade[top - lo:top - lo + (bottom - top)]
+            shade = shade[top - lo : top - lo + (bottom - top)]
             mask = ~valid[top:bottom]
             window = ((top, bottom), (0, width))
             if "g" in writers:
@@ -413,9 +452,19 @@ def _write_gray_pair(out_dir: Path, name: str, filled: np.ndarray, valid: np.nda
     return [paths[tag] for tag in tags]
 
 
-def _write_palette(out_dir: Path, name: str, tag: str, filled: np.ndarray,
-                   valid: np.ndarray, z_min: float, z_range: float, cycles: float,
-                   transform: Affine, crs, block_rows: int = 4096) -> Path:
+def _write_palette(
+    out_dir: Path,
+    name: str,
+    tag: str,
+    filled: np.ndarray,
+    valid: np.ndarray,
+    z_min: float,
+    z_range: float,
+    cycles: float,
+    transform: Affine,
+    crs,
+    block_rows: int = 4096,
+) -> Path:
     """Цветная отмывка «Hot to cold» (TerraModeler): hue = frac(0.75 − N·t)."""
     height, width = filled.shape
     path = out_dir / f"{name}_{tag}.tif"
@@ -426,19 +475,25 @@ def _write_palette(out_dir: Path, name: str, tag: str, filled: np.ndarray,
             t = (block - z_min) / z_range
             hue = (HOT_TO_COLD_PHASE - cycles * t) % 1.0
             value = np.full(t.shape, HOT_TO_COLD_VALUE, dtype=np.float32)
-            rgb = hsv_to_rgb_u8(hue, np.ones_like(t), value)    # (3, h, w)
+            rgb = hsv_to_rgb_u8(hue, np.ones_like(t), value)  # (3, h, w)
             rgb[:, ~valid[top:bottom]] = 0
             writer.write(rgb, window=((top, bottom), (0, width)))
     return path
 
 
-def make_hillshade_set(las_path: Path, out_dir: Path, res: float = 0.1,
-                       modalities: Iterable[str] = HILLSHADE_MODALITIES,
-                       interp: str = "mean", ground_class: int = 2,
-                       use_all: bool = False, max_pixels: int = 60_000_000,
-                       region_crs: Optional[str] = None,
-                       cycles_c: float = DEFAULT_CYCLES_C,
-                       cycles_ch: Optional[float] = None) -> List[Path]:
+def make_hillshade_set(
+    las_path: Path,
+    out_dir: Path,
+    res: float = 0.1,
+    modalities: Iterable[str] = HILLSHADE_MODALITIES,
+    interp: str = "mean",
+    ground_class: int = 2,
+    use_all: bool = False,
+    max_pixels: int = 60_000_000,
+    region_crs: Optional[str] = None,
+    cycles_c: float = DEFAULT_CYCLES_C,
+    cycles_ch: Optional[float] = None,
+) -> List[Path]:
     """Строит из LAS стандартный набор растров и возвращает пути к ним."""
     modalities = [tag for tag in HILLSHADE_MODALITIES if tag in set(modalities)]
     if not modalities:
@@ -449,8 +504,12 @@ def make_hillshade_set(las_path: Path, out_dir: Path, res: float = 0.1,
         raise ValueError(f"{las_path.name}: не задана CRS региона")
 
     dem, transform, stats = build_dem_from_las(
-        las_path, res=res, interp=interp, ground_class=ground_class,
-        use_all=use_all, max_pixels=max_pixels,
+        las_path,
+        res=res,
+        interp=interp,
+        ground_class=ground_class,
+        use_all=use_all,
+        max_pixels=max_pixels,
     )
     valid = np.isfinite(dem)
     if not valid.any():
@@ -464,8 +523,9 @@ def make_hillshade_set(las_path: Path, out_dir: Path, res: float = 0.1,
     name = las_path.stem.replace("_La_точки", "").replace("_La", "").replace("_ground", "")
     written: List[Path] = []
 
-    written.extend(_write_gray_pair(out_dir, name, filled, valid, step, transform,
-                                    region_crs, modalities))
+    written.extend(
+        _write_gray_pair(out_dir, name, filled, valid, step, transform, region_crs, modalities)
+    )
 
     cycles = {
         "c": float(cycles_c),
@@ -477,13 +537,32 @@ def make_hillshade_set(las_path: Path, out_dir: Path, res: float = 0.1,
     for tag in ("c", "ch"):
         if tag not in modalities:
             continue
-        written.append(_write_palette(out_dir, name, tag, filled, valid, z_min, z_range,
-                                      cycles[tag], transform, region_crs))
+        written.append(
+            _write_palette(
+                out_dir,
+                name,
+                tag,
+                filled,
+                valid,
+                z_min,
+                z_range,
+                cycles[tag],
+                transform,
+                region_crs,
+            )
+        )
 
     written.sort(key=lambda path: HILLSHADE_MODALITIES.index(path.stem.rsplit("_", 1)[-1]))
-    logger.info("DEM %d×%d @ %g м, z %.1f…%.1f м; точек земли %d, пустых ячеек %d",
-                dem.shape[1], dem.shape[0], step, z_min, z_max,
-                stats["points"], stats["holes"])
+    logger.info(
+        "DEM %d×%d @ %g м, z %.1f…%.1f м; точек земли %d, пустых ячеек %d",
+        dem.shape[1],
+        dem.shape[0],
+        step,
+        z_min,
+        z_max,
+        stats["points"],
+        stats["holes"],
+    )
     return written
 
 

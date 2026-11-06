@@ -8,6 +8,9 @@
 4. подписи YOLO-seg: «класс x1 y1 x2 y2 …» (нормировано на размер тайла).
 Разбиение train/val — по регионам целиком (VAL_REGIONS или хеш имени).
 Изображения готовятся той же функцией, что на инференсе (koz3.yolo_runtime).
+Формат тайлов — только png (settings.IMAGE_FORMAT, В3): jpg сжимает с
+потерями и ломает пиксельное единство обучения и инференса (5а.1);
+не-png значение останавливает сборку до нарезки.
 
 Запуск:
   python training/build_dataset.py --data /трейн --out /датасет --cache /кэш_хиллшейдов
@@ -33,7 +36,7 @@ import hillshades
 import settings
 from annotations import find_annotation_files, load_objects
 from koz3.discovery import find_regions
-from koz3.yolo_runtime import tile_positions, to_model_image
+from koz3.yolo_runtime import tile_positions, to_model_image, valid_pixel_mask
 
 logger = logging.getLogger("build_dataset")
 
@@ -44,6 +47,21 @@ def split_of(region_name: str) -> str:
         return "val" if region_name in settings.VAL_REGIONS else "train"
     bucket = zlib.crc32(region_name.encode("utf-8")) % 100
     return "val" if bucket < settings.VAL_SHARE * 100 else "train"
+
+
+def check_image_format() -> None:
+    """Проверить settings.IMAGE_FORMAT (В3): допустим только png — без потерь.
+
+    jpg/jpeg — сжатие с потерями: пиксели датасета разойдутся с инференсом
+    (пиксельное единство, 5а.1), причём молча. Ошибка конфигурации — до
+    старта нарезки, а не по факту испорченного датасета.
+    """
+    fmt = str(settings.IMAGE_FORMAT).strip().lower().lstrip(".")
+    if fmt != "png":
+        raise SystemExit(
+            f"settings.IMAGE_FORMAT={settings.IMAGE_FORMAT!r}: допустим только 'png' — "
+            "jpg сжимает с потерями и ломает пиксельное единство с инференсом (5а.1)"
+        )
 
 
 def to_pixels(geom, transform) -> shapely.Geometry:
@@ -85,7 +103,7 @@ def tile_raster(raster_path: Path, objects, out_dir: Path, split: str, region: s
         image = to_model_image(src.read())
         transform, crs = src.transform, src.crs.to_string()
         res_m = abs(transform.a)
-    valid = ~(np.all(image == 0, axis=-1) | np.all(image == 255, axis=-1))
+    valid = valid_pixel_mask(image)
     objects_px = []
     for class_name, geom in objects.get(crs, []):
         px = to_pixels(as_area(geom, res_m), transform)
@@ -170,6 +188,7 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    check_image_format()
 
     for split in ("train", "val"):
         (args.out / "images" / split).mkdir(parents=True, exist_ok=True)

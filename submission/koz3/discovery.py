@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import BinaryIO
 
 import rasterio
-from koz3.datatypes import Region
 from rasterio.crs import CRS
+
+from koz3.datatypes import Region
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +97,7 @@ def find_regions(input_dir: Path) -> list[Region]:
 def _region_dirs(input_dir: Path) -> list[Path]:
     """Подпапки входной папки без скрытых; если подпапок нет — сама папка."""
     subdirs = sorted(
-        path
-        for path in input_dir.iterdir()
-        if path.is_dir() and not path.name.startswith(".")
+        path for path in input_dir.iterdir() if path.is_dir() and not path.name.startswith(".")
     )
     return subdirs or [input_dir]
 

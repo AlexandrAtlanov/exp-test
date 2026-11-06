@@ -2,11 +2,24 @@
 
 Для каждого LAS строит отмывки бейзлайна (lidar_dem) во временной папке,
 режет каждую инференс-отмывку на тайлы с перекрытием, предсказывает маски
-и переводит их в полигоны в UTM региона. Дубли от перекрытия тайлов и от
-нескольких отмывок здесь не подавляются — это делает postprocess по парам
-(class_name, markup_type). Маски, обрезанные внутренним краем тайла, помечаются
-extra["edge_cut"] = True: NMS предпочитает им целые копии того же объекта из
-соседнего тайла.
+и переводит их в полигоны в UTM региона. Список LAS берётся только из
+region.files["li"] (discovery) — один источник для is_available,
+estimate_seconds и run: рассинхрон паттернов поиска исключён (В1).
+Тайлы с долей валидных пикселей
+ниже LIDAR["min_valid_share"] (вне охвата данных) пропускаются — тот же
+фильтр, что при сборке датасета. Инференс идёт чанками по batch с проверкой
+бюджета перед каждым чанком (оценка — по фактической скорости): при
+исчерпании остаток отмывки пропускается, найденное возвращается. Ошибка
+одного чанка (OOM, несовпадение числа результатов у engine со статическим
+batch) не роняет отмывку: чанк пропускается, найденное копится. Дубли от
+перекрытия тайлов и от нескольких отмывок здесь не подавляются — это делает
+postprocess по парам (class_name, markup_type). Маски, обрезанные внутренним
+краем тайла, помечаются extra["edge_cut"] = True: NMS предпочитает им целые
+копии того же объекта из соседнего тайла. Известное ограничение (склейка
+отложена, не к первой отправке): объект крупнее тайла обрезан во всех
+своих тайлах — NMS может не собрать его из фрагментов; краткосрочно
+tile_px выбирается с запасом против максимального объекта крупных классов
+(поселения, фортификации).
 """
 
 import logging
@@ -47,7 +60,12 @@ _model_error: str = ""
 
 
 def is_available(region: Region) -> bool:
-    """Детектор применим: есть LAS в регионе и веса (.pt или .engine)."""
+    """Детектор применим: есть LAS в регионе и веса (.pt или .engine).
+
+    Единственный источник списка LAS — region.files["li"] (discovery);
+    его же читают estimate_seconds и run (В1), поэтому is_available=True
+    при пустом run исключён самой структурой, без сверки паттернов.
+    """
     if not region.files.get("li"):
         return False
     weights_dir = config.WEIGHTS_DIR
@@ -57,14 +75,13 @@ def is_available(region: Region) -> bool:
 
 
 def estimate_seconds(region: Region) -> float:
-    """Оценка времени на регион, с: суммарный размер LAS * seconds_per_gb."""
-    try:
-        las_files = lidar_dem.find_las_files(region.path)
-    except Exception:  # noqa: BLE001  # оценка не должна ронять планирование
-        logger.exception("li %s: поиск LAS упал: %s", region.name, region.path)
-        return 0.0
+    """Оценка времени на регион, с: суммарный размер LAS * seconds_per_gb.
+
+    LAS — из region.files["li"] (тот же список, что в is_available и run,
+    В1): оценка и запуск видят одни и те же файлы.
+    """
     total_bytes = 0
-    for las_path in las_files:
+    for las_path in region.files.get("li", []):
         try:
             total_bytes += las_path.stat().st_size
         except OSError as exc:
@@ -82,13 +99,10 @@ def run(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
 
     Ошибка одного LAS (или одного файла внутри него) не прерывает остальные.
     При нехватке бюджета пропускаются целые LAS и отдельные отмывки; уже
-    найденные детекции возвращаются всегда.
+    найденные детекции возвращаются всегда. Список LAS — region.files["li"],
+    как в is_available/estimate_seconds (единственный источник, В1).
     """
-    try:
-        las_files = lidar_dem.find_las_files(region.path)
-    except Exception:  # noqa: BLE001  # список LAS не должен ронять регион
-        logger.exception("li %s: поиск LAS упал: %s", region.name, region.path)
-        return []
+    las_files = region.files.get("li") or []
     if not las_files:
         logger.warning("li %s: LAS-файлы не найдены", region.name)
         return []
@@ -142,7 +156,9 @@ def _load_model_once() -> yolo_runtime.LoadedModel | None:
     """Загрузить модель один раз на прогон (кэш на уровне модуля).
 
     При неудаче возвращает None и запоминает причину: повторные вызовы в
-    этом прогоне не пытаются загрузить модель снова.
+    этом прогоне не пытаются загрузить модель снова. Время загрузки (10–30 с
+    вне оценки seconds_per_gb, В5) пишется в лог — при калибровке оно
+    закладывается в запас TIME_LIMIT_S, а не в seconds_per_gb.
     """
     global _model, _model_error
     if _model is not None:
@@ -150,12 +166,18 @@ def _load_model_once() -> yolo_runtime.LoadedModel | None:
     if _model_error:
         logger.warning("li: модель уже не загрузилась ранее (%s)", _model_error)
         return None
+    started_s = time.monotonic()
     try:
         _model = yolo_runtime.load_model()
     except Exception as exc:  # noqa: BLE001  # без модели детектор пропускается
         _model_error = str(exc)
         logger.exception("li: модель не загрузилась, детектор пропущен")
         return None
+    logger.info(
+        "li: модель загружена (%s) за %.1f с — вне оценки seconds_per_gb",
+        _model.kind,
+        time.monotonic() - started_s,
+    )
     return _model
 
 
@@ -215,6 +237,7 @@ def _process_las(
                     tif_path,
                     variant,
                     model,
+                    budget,
                     cfg,
                 )
             except Exception:  # noqa: BLE001  # одна отмывка не роняет весь LAS
@@ -240,15 +263,35 @@ def _process_las(
 
 
 def _match_hillshades(tif_paths: list[Path], cfg: ModuleType) -> dict[str, Path]:
-    """Сопоставить tif-файлы отмывок вариантам: порядок = cfg.LIDAR["hillshades"]."""
+    """Сопоставить tif-файлы отмывок вариантам по суффиксу имени файла.
+
+    Симметрично обучению (training/hillshades.tag_of): вариант — суффикс
+    имени после последнего «_» (…_c.tif → «c»). Позиционное сопоставление
+    dict(zip) молча путало варианты при другом порядке возврата lidar_dem;
+    по тегу порядок не важен. Неизвестный тег и повтор варианта —
+    предупреждение в лог, отсутствующие варианты логирует _process_las.
+    """
     variants: tuple[str, ...] = tuple(cfg.LIDAR["hillshades"])
-    if len(tif_paths) != len(variants):
-        logger.warning(
-            "li: hillshades_for_las вернула %d файлов, ожидалось %d",
-            len(tif_paths),
-            len(variants),
-        )
-    matched = dict(zip(variants, tif_paths, strict=False))
+    matched: dict[str, Path] = {}
+    for path in tif_paths:
+        tag = path.stem.rsplit("_", 1)[-1].lower()
+        if tag not in variants:
+            logger.warning(
+                "li: суффикс %r файла %s не является вариантом отмывки %s",
+                tag,
+                path.name,
+                list(variants),
+            )
+            continue
+        if tag in matched:
+            logger.warning(
+                "li: вариант %s повторяется (%s), оставлен первый: %s",
+                tag,
+                path.name,
+                matched[tag].name,
+            )
+            continue
+        matched[tag] = path
     logger.debug("li: отмывки по вариантам: %s", matched)
     return matched
 
@@ -262,6 +305,16 @@ class _Tile:
     col0: int  # левый столбец тайла в растре, px
     height: int  # реальная высота фрагмента без дополнения, px
     width: int  # реальная ширина фрагмента без дополнения, px
+
+
+@dataclass(frozen=True)
+class _Raster:
+    """Растр отмывки: привязка, CRS и размер, общие для всех его тайлов."""
+
+    transform: Affine
+    crs: RasterCRS
+    height: int
+    width: int
 
 
 def _make_tiles(image: np.ndarray, tile_px: int, overlap: float) -> list[_Tile]:
@@ -298,64 +351,190 @@ def _pad_to_tile(fragment: np.ndarray, tile_px: int) -> np.ndarray:
     return padded
 
 
+def _valid_tiles(
+    tiles: list[_Tile], valid: np.ndarray, min_share: float
+) -> tuple[list[_Tile], int]:
+    """Тайлы с долей валидных пикселей не ниже min_share; (оставленные, пропущенные).
+
+    Тот же фильтр, что при сборке датасета (build_dataset): тайлы целиком
+    вне охвата данных не подаются модели, частично валидные — обрабатываются.
+    """
+    kept: list[_Tile] = []
+    for tile in tiles:
+        rows = valid[tile.row0 : tile.row0 + tile.height]
+        window = rows[:, tile.col0 : tile.col0 + tile.width]
+        if float(window.mean()) >= min_share:
+            kept.append(tile)
+    return kept, len(tiles) - len(kept)
+
+
 def _predict_hillshade(
     region: Region,
     las_path: Path,
     tif_path: Path,
     variant: str,
     model: yolo_runtime.LoadedModel,
+    budget: Budget,
     cfg: ModuleType,
 ) -> list[Detection]:
     """Предсказать объекты на одной отмывке: растр -> тайлы -> маски -> UTM.
 
-    Маски обрезаются до реального края тайла (зона дополнения нулями
-    отбрасывается), полигоны переводятся из CRS растра в UTM региона.
+    Тайлы с долей валидных пикселей ниже LIDAR["min_valid_share"] (вне охвата
+    данных) пропускаются — тот же фильтр, что при сборке датасета; частично
+    валидные тайлы обрабатываются. При исчерпании бюджета внутри отмывки
+    (см. _predict_chunks) найденное возвращается. Полигоны переводятся из
+    CRS растра в UTM региона.
     """
     started_s = time.monotonic()
     with rasterio.open(tif_path) as src:
-        raster_transform = src.transform
-        raster_crs = src.crs
-        raster = src.read()
-    if raster_crs is None:
-        logger.warning(
-            "li %s: %s без CRS, отмывка пропущена",
+        # CRS проверяется до чтения растра: битые файлы не тянут весь массив
+        if src.crs is None:
+            logger.warning(
+                "li %s: %s без CRS, отмывка пропущена",
+                region.name,
+                tif_path.name,
+            )
+            return []
+        raster = _Raster(transform=src.transform, crs=src.crs, height=src.height, width=src.width)
+        bands = src.read()
+    image = yolo_runtime.to_model_image(bands)
+    tiles = _make_tiles(image, int(cfg.LIDAR["tile_px"]), float(cfg.LIDAR["overlap"]))
+    tiles, nodata_tiles = _valid_tiles(
+        tiles,
+        yolo_runtime.valid_pixel_mask(image),
+        float(cfg.LIDAR["min_valid_share"]),
+    )
+    if nodata_tiles:
+        logger.info(
+            "li %s: %s, отмывка %s — вне данных пропущено тайлов: %d из %d",
             region.name,
-            tif_path.name,
+            las_path.name,
+            variant,
+            nodata_tiles,
+            len(tiles) + nodata_tiles,
+        )
+    if not tiles:
+        logger.warning(
+            "li %s: %s, отмывка %s — все тайлы вне данных, инференс пропущен",
+            region.name,
+            las_path.name,
+            variant,
         )
         return []
-    image = yolo_runtime.to_model_image(raster)
-    raster_height, raster_width = image.shape[:2]
-    tiles = _make_tiles(image, int(cfg.LIDAR["tile_px"]), float(cfg.LIDAR["overlap"]))
-    detections: list[Detection] = []
-    predicted = yolo_runtime.predict_tiles(model, [tile.image for tile in tiles])
-    for tile, instances in zip(tiles, predicted, strict=True):
-        tile_transform = raster_transform * Affine.translation(tile.col0, tile.row0)
-        for inst in instances:
-            mask = inst.mask[: tile.height, : tile.width]
-            if not mask.any():
-                continue
-            edge_cut = _touches_inner_edge(mask, tile, raster_height, raster_width)
-            for geom in geometry.mask_to_polygons(mask, tile_transform):
-                detections.append(
-                    Detection(
-                        geom=_to_region_crs(geom, raster_crs, region),
-                        class_name=inst.class_name,
-                        confidence=inst.confidence,
-                        markup_type=MARKUP_TYPE,
-                        region_name=region.name,
-                        source=f"{las_path.name}:{variant}",
-                        extra={"edge_cut": edge_cut},
-                    )
-                )
+    detections = _predict_chunks(tiles, raster, region, las_path, variant, model, budget)
     logger.info(
-        "li %s: %s, отмывка %s — %d тайлов, %d детекций за %.1f с",
+        "li %s: %s, отмывка %s — тайлов %d (вне данных %d), детекций %d за %.1f с",
         region.name,
         las_path.name,
         variant,
         len(tiles),
+        nodata_tiles,
         len(detections),
         time.monotonic() - started_s,
     )
+    return detections
+
+
+def _predict_chunks(
+    tiles: list[_Tile],
+    raster: _Raster,
+    region: Region,
+    las_path: Path,
+    variant: str,
+    model: yolo_runtime.LoadedModel,
+    budget: Budget,
+) -> list[Detection]:
+    """Инференс по тайлам чанками по batch; перед каждым чанком — проверка бюджета.
+
+    Оценка следующего чанка — по фактической скорости уже обработанных
+    тайлов. Первый чанк запускается без проверки: он прикрыт оценкой отмывки
+    в _process_las, а перерасход при заниженной оценке ограничен одним
+    чанком. При исчерпании бюджета остаток отмывки пропускается, найденное
+    возвращается. Ошибка одного чанка (OOM, несовпадение числа результатов
+    у engine со статическим batch) не роняет отмывку: чанк пропускается с
+    logger.exception, найденное копится; время неудачной попытки входит в
+    оценку, её тайлы — нет (оценка консервативнее). Порядок и состав
+    батчей совпадают со сплошным проходом, поэтому детекции полного
+    прохода не меняются.
+    """
+    detections: list[Detection] = []
+    batch = max(1, int(model.batch))
+    done_tiles = 0
+    spent_s = 0.0
+    for start in range(0, len(tiles), batch):
+        chunk = tiles[start : start + batch]
+        if done_tiles:
+            chunk_estimate_s = spent_s / done_tiles * len(chunk)
+            if not budget.can_afford(chunk_estimate_s):
+                logger.warning(
+                    "li %s: %s, отмывка %s — бюджет %.0f с не покрывает чанк "
+                    "(оценка %.0f с): остаток пропущен, не обработано тайлов %d из %d",
+                    region.name,
+                    las_path.name,
+                    variant,
+                    budget.remaining(),
+                    chunk_estimate_s,
+                    len(tiles) - done_tiles,
+                    len(tiles),
+                )
+                break
+        chunk_started_s = time.monotonic()
+        try:
+            predicted = yolo_runtime.predict_tiles(model, [tile.image for tile in chunk])
+            for tile, instances in zip(chunk, predicted, strict=True):
+                detections.extend(
+                    _tile_detections(tile, instances, raster, region, las_path.name, variant)
+                )
+            done_tiles += len(chunk)
+        except Exception:  # noqa: BLE001  # чанк не роняет отмывку: найденное копится
+            logger.exception(
+                "li %s: %s, отмывка %s — ошибка чанка тайлов %d–%d из %d, "
+                "чанк пропущен, найденное сохраняется (%d)",
+                region.name,
+                las_path.name,
+                variant,
+                start,
+                start + len(chunk) - 1,
+                len(tiles),
+                len(detections),
+            )
+        spent_s += time.monotonic() - chunk_started_s
+    return detections
+
+
+def _tile_detections(
+    tile: _Tile,
+    instances: list[yolo_runtime.TileInstance],
+    raster: _Raster,
+    region: Region,
+    las_name: str,
+    variant: str,
+) -> list[Detection]:
+    """Детекции одного тайла: маски -> полигоны в UTM региона.
+
+    Маски обрезаются до реального края тайла (зона дополнения нулями
+    отбрасывается); маски, обрезанные внутренним краем тайла, помечаются
+    extra["edge_cut"] = True.
+    """
+    tile_transform = raster.transform * Affine.translation(tile.col0, tile.row0)
+    detections: list[Detection] = []
+    for inst in instances:
+        mask = inst.mask[: tile.height, : tile.width]
+        if not mask.any():
+            continue
+        edge_cut = _touches_inner_edge(mask, tile, raster.height, raster.width)
+        for geom in geometry.mask_to_polygons(mask, tile_transform):
+            detections.append(
+                Detection(
+                    geom=_to_region_crs(geom, raster.crs, region),
+                    class_name=inst.class_name,
+                    confidence=inst.confidence,
+                    markup_type=MARKUP_TYPE,
+                    region_name=region.name,
+                    source=f"{las_name}:{variant}",
+                    extra={"edge_cut": edge_cut},
+                )
+            )
     return detections
 
 

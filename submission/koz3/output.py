@@ -32,6 +32,7 @@ from . import config
 
 logger = logging.getLogger("koz3.output")
 
+
 def _cfg(*names: str, default: Any = None) -> Any:
     for name in names:
         value = getattr(config, name, None) if config is not None else None
@@ -61,14 +62,20 @@ def _resolve_classes() -> dict[str, int]:
 
 
 _CLASSES: dict[str, int] = _resolve_classes()
-_MARKUP_TYPES: frozenset[str] = frozenset(_cfg("MARKUP_TYPES", "MARKUP_TYPE_VALUES", default=("li", "ae", "sp_or", "or", "maggr", "etgr", "terfl"),))
+_MARKUP_TYPES: frozenset[str] = frozenset(
+    _cfg(
+        "MARKUP_TYPES",
+        "MARKUP_TYPE_VALUES",
+        default=("li", "ae", "sp_or", "or", "maggr", "etgr", "terfl"),
+    )
+)
 MAX_FEATURES: int = int(_cfg("MAX_FEATURES", default=20_000))
 MAX_RING_POSITIONS: int = int(_cfg("MAX_RING_POSITIONS", "MAX_RING_VERTICES", default=3_000))
 COORD_PRECISION: int = int(_cfg("OUTPUT_COORD_PRECISION", "COORD_PRECISION", default=2))
 OUTPUT_SIZE_LIMIT_BYTES: int = int(_cfg("OUTPUT_SIZE_LIMIT_BYTES", default=95 * 1024 * 1024))
 OUTPUT_SIZE_HARD_LIMIT_BYTES: int = 100 * 1024 * 1024
 
-_VERTEX_SIMPLIFY_START_M3857: int = (2_400)
+_VERTEX_SIMPLIFY_START_M3857: int = 2_400
 _VERTEX_SIMPLIFY_BASE_TOL_M3857: float = 5.0
 _VERTEX_SIMPLIFY_MAX_TOL_M3857: float = 25.0
 
@@ -95,6 +102,7 @@ _json_cache: dict[int, str] = {}
 
 last_stats: dict[str, Any] = {}
 
+
 def resolve_output_path(path: str | os.PathLike[str] | None = None) -> Path:
     """Возвращает целевой файл *.geojson и создаёт каталог.
 
@@ -112,9 +120,7 @@ def resolve_output_path(path: str | os.PathLike[str] | None = None) -> Path:
             result = result / "result.geojson"
     parent = result.parent
     if parent.exists() and not parent.is_dir():  # Д12
-        raise NotADirectoryError(
-            f"выходной путь {parent} существует, но не является директорией"
-        )
+        raise NotADirectoryError(f"выходной путь {parent} существует, но не является директорией")
     parent.mkdir(parents=True, exist_ok=True)
     return result
 
@@ -128,9 +134,7 @@ def _write_json_atomic(payload: Any, path: Path) -> None:
     tmp = path.with_name(path.name + ".tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(
-                payload, fh, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-            )
+            json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -145,9 +149,7 @@ def _feature_json(item: dict[str, Any]) -> str:
     """
     cached = _json_cache.get(id(item))
     if cached is None:
-        cached = json.dumps(
-            item, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-        )
+        cached = json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         _json_cache[id(item)] = cached
     return cached
 
@@ -171,6 +173,7 @@ def _write_features_json_atomic(items: list[dict[str, Any]], path: Path) -> None
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
         raise
+
 
 def _reproject(coords: np.ndarray) -> np.ndarray:
     """Адаптер пакетной репроекции для shapely.transform: (N, 2) -> (N, 2)."""
@@ -320,6 +323,7 @@ def _dedupe_rings(geom: Polygon | MultiPolygon) -> BaseGeometry | None:
         return None
     return MultiPolygon(parts) if len(parts) > 1 else parts[0]
 
+
 def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
     """Готовит одну фичу к записи. Возвращает (json-фича | None, коды дефектов).
 
@@ -419,6 +423,7 @@ def _prepare_feature(feature: Any) -> tuple[dict[str, Any] | None, tuple[str, ..
     }
     return prepared, ()
 
+
 def _largest_polygon(geom: BaseGeometry) -> Polygon | None:
     """Самая большая часть-Polygon (метрика всё равно берёт только её)."""
     if isinstance(geom, Polygon):
@@ -431,9 +436,7 @@ def _feature_confidence(feature: Mapping) -> float:
     return float(feature["properties"]["confidence"])
 
 
-def _cap_features(
-    prepared: list[dict[str, Any]], cap: int, reason: str
-) -> list[dict[str, Any]]:
+def _cap_features(prepared: list[dict[str, Any]], cap: int, reason: str) -> list[dict[str, Any]]:
     """Обрезает отсортированный по убыванию confidence список до cap.
 
     Д3: не вслепую по confidence. Каждому присутствующему классу
@@ -505,9 +508,8 @@ def _fit_size_limit(features: list[dict[str, Any]], path: Path) -> list[dict[str
         )
     return features
 
-def write_result(
-    features: Any, output_path: str | os.PathLike[str] | None = None
-) -> Path:
+
+def write_result(features: Any, output_path: str | os.PathLike[str] | None = None) -> Path:
     """Готовит фичи и атомарно пишет result.geojson.
 
     Вызывается после каждой пары детекторов (контракт раздела 5): файл на
@@ -533,9 +535,7 @@ def write_result(
             try:
                 cached = _prepare_feature(feat)
             except _PREPARE_EXCEPTIONS as exc:
-                logger.exception(
-                    "непредвиденная ошибка подготовки фичи, дропаю: %r", exc
-                )
+                logger.exception("непредвиденная ошибка подготовки фичи, дропаю: %r", exc)
                 cached = (None, ("error",))
             _pinned.append(feat)
             _prepared_cache[key] = cached
@@ -547,9 +547,7 @@ def write_result(
             prepared.append(item)
 
     prepared.sort(key=_feature_confidence, reverse=True)
-    prepared = _cap_features(
-        prepared, MAX_FEATURES, f"MAX_FEATURES={MAX_FEATURES}"
-    )
+    prepared = _cap_features(prepared, MAX_FEATURES, f"MAX_FEATURES={MAX_FEATURES}")
     prepared = _fit_size_limit(prepared, result)
 
     size = result.stat().st_size

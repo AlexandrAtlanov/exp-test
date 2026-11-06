@@ -8,9 +8,9 @@
 
 from functools import lru_cache
 
-from affine import Affine
 import numpy as np
 import shapely
+from affine import Affine
 from pyproj import Transformer
 from rasterio import features
 from shapely.geometry import Polygon, shape
@@ -39,9 +39,7 @@ def mask_to_polygons(mask: np.ndarray, transform: Affine) -> list[Polygon]:
     if not binary.any():
         return []
     polygons = [
-        shape(geom)
-        for geom, value in features.shapes(binary, transform=transform)
-        if value == 1
+        shape(geom) for geom, value in features.shapes(binary, transform=transform) if value == 1
     ]
     return [poly for poly in polygons if poly.area >= config.MASK_MIN_AREA_M2]
 

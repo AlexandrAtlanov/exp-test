@@ -48,6 +48,7 @@ def canonical_class(raw: str | None) -> str | None:
             return settings.CLASS_SYNONYMS[synonym]
     return None
 
+
 def _props_ignored(props: dict[str, object]) -> bool:
     """True, если классоподобное свойство — класс из игнор-листа."""
     for key in settings.CLASS_PROPERTY_KEYS:
@@ -55,6 +56,7 @@ def _props_ignored(props: dict[str, object]) -> bool:
         if raw is not None and normalize_name(str(raw)) in settings.IGNORED_CLASSES:
             return True
     return False
+
 
 def markup_type_from_name(path: Path) -> str | None:
     """Тип данных по меткам в имени файла (Li/La/Ae/SpOr/Or)."""

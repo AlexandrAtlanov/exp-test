@@ -34,7 +34,8 @@ def sha256(path: Path) -> str:
 
 def main() -> None:
     """Обучить модель и сохранить лучшие веса с паспортом."""
-    from ultralytics import YOLO, __version__ as ultralytics_version
+    from ultralytics import YOLO
+    from ultralytics import __version__ as ultralytics_version
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", required=True, type=Path)

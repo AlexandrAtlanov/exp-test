@@ -73,7 +73,6 @@ IGNORED_CLASSES: tuple[str, ...] = ("structrpoly", "structpoly", "structurepoly"
 из этих имён."""
 
 MARKUP_LABELS: dict[str, str] = {
-
     "li": "li",
     "la": "li",
     "ae": "ae",

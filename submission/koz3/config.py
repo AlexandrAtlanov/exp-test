@@ -91,9 +91,14 @@ LIDAR: dict[str, object] = {
     "infer_hillshades": ("c", "ch", "g", "i"),  # отмывки для инференса
     "tile_px": 1024,
     "overlap": 0.3,
+    # порог доли валидных пикселей тайла (не «все 0» / не «все 255»);
+    # ниже — тайл пропускается на инференсе; равен settings.MIN_VALID_SHARE трейна
+    "min_valid_share": 0.05,
     "seconds_per_gb": 60.0,  # оценка: секунд на ГБ LAS
 }
 """Параметры лидарного детектора: DEM, хиллшейды, нарезка на тайлы."""
+
+WEIGHTS_DIR: Path = Path(__file__).resolve().parent.parent / "weights"
 
 SURFACE_CLASSES: tuple[str, ...] = (
     "kurgany_tselye",

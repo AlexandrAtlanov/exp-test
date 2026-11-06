@@ -74,7 +74,8 @@ def main() -> None:
     """Экспорт engine, паспорт, проверка совпадения с .pt."""
     import tensorrt as trt
     import torch
-    from ultralytics import YOLO, __version__ as ultralytics_version
+    from ultralytics import YOLO
+    from ultralytics import __version__ as ultralytics_version
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weights", required=True, type=Path, help="lidar_yolo.pt")

@@ -4,7 +4,9 @@
 koz3.detectors.lidar_dem (дословный перенос алгоритма бейзлайна). Датасет по
 умолчанию строится тем же модулем (источник «las»), поэтому обучение и инференс
 видят одинаковые пиксели. Источник «li» (готовые растры трейна) быстрее, но
-использовать его стоит только после check_hillshades.py.
+использовать его стоит только после check_hillshades.py. Кэш версионируется
+(CACHE_VERSION): при изменении алгоритма отмывок версия поднимается, и кэш
+пересчитывается целиком.
 """
 
 import logging
@@ -15,6 +17,12 @@ from koz3.detectors.lidar_dem import hillshades_for_las
 
 logger = logging.getLogger(__name__)
 
+#: Версия алгоритма отмывок — входит в путь кэша. Поднять при любом изменении
+#: koz3.detectors.lidar_dem (алгоритм, параметры) или настроек, влияющих на
+#: отмывки (res_m, набор вариантов): иначе кэш молча отдаст старые tif, и
+#: датасет разойдётся с инференсом именно там, где это сложнее заметить.
+CACHE_VERSION: str = "v1"
+
 
 def tag_of(path: Path) -> str:
     """Вариант отмывки по суффиксу имени файла: _c, _ch, _g, _i (иначе '?')."""
@@ -23,8 +31,8 @@ def tag_of(path: Path) -> str:
 
 
 def from_las(las_path: Path, region_crs: str, cache_dir: Path) -> list[Path]:
-    """Хиллшейды для LAS (кэшируются в cache_dir) — тем же кодом, что на инференсе."""
-    out_dir = cache_dir / las_path.stem
+    """Хиллшейды для LAS (кэш: cache_dir/CACHE_VERSION) — как на инференсе."""
+    out_dir = cache_dir / CACHE_VERSION / las_path.stem
     existing = sorted(out_dir.glob("*.tif"))
     if len(existing) >= len(settings.HILLSHADES):
         return [p for p in existing if tag_of(p) in settings.HILLSHADES]
