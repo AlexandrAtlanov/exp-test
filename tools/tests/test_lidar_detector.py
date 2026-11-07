@@ -52,8 +52,14 @@ def _make_region(region_dir: Path, las_names: list[str]) -> tuple[Region, list[P
     return region, las_paths
 
 
-def _write_tif(path: Path, transform: Affine, crs: str, width: int, height: int) -> None:
-    """Синтетический однополосный uint8 tif, залитый нулями."""
+def _write_tif(
+    path: Path, transform: Affine, crs: str, width: int, height: int, fill: int = 128
+) -> None:
+    """Синтетический однополосный uint8 tif, залитый серым 128.
+
+    Не нулями: тайлы из одних 0 (или 255) lidar считает «вне данных» и не
+    подаёт модели (LIDAR["min_valid_share"]).
+    """
     profile = {
         "driver": "GTiff",
         "height": height,
@@ -64,7 +70,7 @@ def _write_tif(path: Path, transform: Affine, crs: str, width: int, height: int)
         "transform": transform,
     }
     with rasterio.open(path, "w", **profile) as dst:
-        dst.write(np.zeros((1, height, width), dtype=np.uint8))
+        dst.write(np.full((1, height, width), fill, dtype=np.uint8))
 
 
 def _hillshade_stub(
@@ -75,17 +81,19 @@ def _hillshade_stub(
     height=12,
     fail_for=(),
     variants=None,
+    fill=128,
 ):
+    forced = variants  # набор, который «вернёт» lidar_dem, независимо от запроса
     """Стаб lidar_dem.hillshades_for_las: пишет синтетические tif (или падает)."""
 
-    def fake_hillshades(las_path, region_crs, out_dir):
+    def fake_hillshades(las_path, region_crs, out_dir, variants=None):
         if las_path.name in fail_for:
             raise RuntimeError(f"синтетическая ошибка: {las_path.name}")
-        written = config.LIDAR["hillshades"] if variants is None else variants
+        written = config.LIDAR["hillshades"] if forced is None else forced
         paths = []
         for variant in written:
             tif_path = Path(out_dir) / f"hillshade_{variant}.tif"
-            _write_tif(tif_path, transform, write_crs, width, height)
+            _write_tif(tif_path, transform, write_crs, width, height, fill)
             paths.append(tif_path)
         return paths
 
@@ -106,12 +114,16 @@ def _predict_stub(monkeypatch, instances_by_tile):
 
 
 def _load_stub(monkeypatch, calls=None):
-    """Стаб load_model: фиктивная LoadedModel, вызовы считаются."""
+    """Стаб load_model: фиктивная LoadedModel, вызовы считаются.
+
+    batch=64 — вся синтетическая отмывка уходит одним вызовом predict_tiles, и
+    _predict_stub раздаёт маски по номеру тайла внутри отмывки.
+    """
 
     def fake_load(weights_dir=None):
         if calls is not None:
             calls.append(1)
-        return yolo_runtime.LoadedModel(model=object(), kind="stub", names={}, batch=1)
+        return yolo_runtime.LoadedModel(model=object(), kind="stub", names={}, batch=64)
 
     monkeypatch.setattr(yolo_runtime, "load_model", fake_load)
 
@@ -210,15 +222,26 @@ def test_estimate_seconds_is_linear_in_las_size(tmp_path, monkeypatch):
     assert lidar.estimate_seconds(region) == pytest.approx(expected)
 
 
-def test_estimate_seconds_survives_find_error(tmp_path, monkeypatch):
-    """Ошибка поиска LAS при оценке времени не роняет прогон: результат 0.0."""
-    region, _ = _make_region(tmp_path, ["a.las"])
+def test_estimate_seconds_skips_missing_las(tmp_path):
+    """LAS из region.files, которого нет на диске, не роняет оценку: он не учитывается."""
+    region, las_paths = _make_region(tmp_path, ["a.las", "b.las"])
+    las_paths[1].unlink()
+    per_gb = float(config.LIDAR["seconds_per_gb"])
+    assert lidar.estimate_seconds(region) == pytest.approx(1024 / 1e9 * per_gb)
 
-    def broken_find(region_dir):
-        raise RuntimeError("синтетическая ошибка")
 
-    monkeypatch.setattr(lidar_dem, "find_las_files", broken_find)
-    assert lidar.estimate_seconds(region) == 0.0
+def test_all_nodata_tiles_skip_inference(tmp_path, monkeypatch, fresh_detector):
+    """Отмывка целиком вне данных (одни нули): модель не вызывается, результат пуст."""
+    region, las_paths = _make_region(tmp_path, ["ground.las"])
+    _find_las_stub(monkeypatch, las_paths)
+    _hillshade_stub(monkeypatch, REGION_CRS, UTM_TRANSFORM, width=24, height=24, fill=0)
+    _load_stub(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        yolo_runtime, "predict_tiles", lambda loaded, tiles: calls.append(tiles) or iter([])
+    )
+    assert lidar.run(region, Budget(600), config) == []
+    assert calls == []
 
 
 def test_run_happy_path_detections_in_utm(tmp_path, monkeypatch, fresh_detector):

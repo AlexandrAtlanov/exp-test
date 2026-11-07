@@ -208,6 +208,7 @@ def _process_las(
             las_path,
             region.utm_crs,
             Path(tmp_dir),
+            variants=variants,  # только нужные инференсу отмывки
         )
         by_variant = _match_hillshades(tif_paths, cfg)
         for variant in variants:

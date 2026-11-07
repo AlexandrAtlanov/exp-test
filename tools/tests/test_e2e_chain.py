@@ -124,7 +124,8 @@ def chain(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WEIGHTS_DIR", weights)
     monkeypatch.setitem(config.LIDAR, "tile_px", 256)
     monkeypatch.setitem(config.LIDAR, "infer_hillshades", ("g",))
-    monkeypatch.setattr(lidar, "_load_model_once", lambda: object())
+    stub = yolo_runtime.LoadedModel(model=object(), kind="stub", names={}, batch=8)
+    monkeypatch.setattr(lidar, "_load_model_once", lambda: stub)
     monkeypatch.setattr(yolo_runtime, "predict_tiles", _fake_predict)
     return tmp_path
 

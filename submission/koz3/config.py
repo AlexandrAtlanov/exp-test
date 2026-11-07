@@ -89,6 +89,7 @@ LIDAR: dict[str, object] = {
     "max_pixels": 60_000_000,  # как в бейзлайне
     "hillshades": ("c", "ch", "g", "i"),
     "infer_hillshades": ("c", "ch", "g", "i"),  # отмывки для инференса
+    # тайл в пикселях отмывки (0.1 м → 102 м); модели подаётся сжатым до YOLO["imgsz"]
     "tile_px": 1024,
     "overlap": 0.3,
     # порог доли валидных пикселей тайла (не «все 0» / не «все 255»);
@@ -97,8 +98,6 @@ LIDAR: dict[str, object] = {
     "seconds_per_gb": 60.0,  # оценка: секунд на ГБ LAS
 }
 """Параметры лидарного детектора: DEM, хиллшейды, нарезка на тайлы."""
-
-WEIGHTS_DIR: Path = Path(__file__).resolve().parent.parent / "weights"
 
 SURFACE_CLASSES: tuple[str, ...] = (
     "kurgany_tselye",
@@ -113,7 +112,9 @@ YOLO: dict[str, object] = {
     "weights_pt": "lidar_yolo.pt",
     "weights_engine": "lidar_yolo.engine",
     "prefer_engine": True,  # TensorRT engine, если есть файл и совместимая среда
-    "imgsz": 1024,
+    # размер входа модели: тайл LIDAR["tile_px"] сжимается до imgsz (1024 → 512 = 0.2 м/пикс).
+    # Одно значение для обучения (training/train.py) и инференса; смена — переобучение и engine.
+    "imgsz": 512,
     "half": True,  # FP16 для .pt; engine уже собран в FP16
     "batch": 8,  # тайлов за вызов predict (engine с batch=1 гоняется по одному)
     "conf": 0.05,  # низкий порог модели; рабочие пороги — CONF_THRESHOLD в postprocess
