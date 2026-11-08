@@ -57,7 +57,11 @@ def _fake_result(class_ids: list[int]) -> object:
 
 
 def test_baseline_class_names_mapped_and_unknown_dropped() -> None:
-    """Модель бейзлайна: «kurgany» → kurgany_tselye, gorodishcha как есть, «dorogi» — отброс."""
+    """model.pt: «kurgany» → оба класса курганов, gorodishcha как есть, «dorogi» — отброс."""
     names = {0: "gorodishcha", 4: "kurgany", 5: "dorogi"}
     found = yolo_runtime._instances(_fake_result([0, 4, 5]), (4, 4), names)
-    assert [inst.class_name for inst in found] == ["gorodishcha", "kurgany_tselye"]
+    assert [inst.class_name for inst in found] == [
+        "gorodishcha",
+        "kurgany_tselye",
+        "kurgany_povrezhdennye",
+    ]

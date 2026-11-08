@@ -53,7 +53,7 @@ def _hill_mask(image: np.ndarray) -> np.ndarray:
     return valid & (np.abs(gray - G_BACKGROUND) > 40)
 
 
-def _fake_predict(_model, tiles):
+def _fake_predict(_model, tiles, imgsz=None):
     """«Модель»: по экземпляру на каждое связное пятно холма в тайле."""
     for image in tiles:
         labels, count = ndimage.label(_hill_mask(image))
@@ -116,15 +116,21 @@ def _to_utm(geom):
     return shapely.transform(geom, lambda xy: np.column_stack(to_utm.transform(*xy.T)))
 
 
-@pytest.fixture
-def chain(tmp_path, monkeypatch):
-    """Подмены: фиктивные веса, детектор холма вместо YOLO, тайл 256 px (4 тайла)."""
+@pytest.fixture(params=["tiles", "whole"])
+def chain(tmp_path, monkeypatch, request):
+    """Подмены: фиктивные веса, детектор холма вместо YOLO; оба режима лидара.
+
+    tiles — тайл 256 px (4 тайла, стык тайлов); whole — вся отмывка одним кадром
+    (сжатие, выравнивание и обратная привязка, как у модели бейзлайна).
+    """
+    monkeypatch.setitem(config.LIDAR, "infer_mode", request.param)
     weights = _mk(tmp_path / "weights")
     (weights / str(config.YOLO["weights_pt"])).write_bytes(b"fake")
     monkeypatch.setattr(config, "WEIGHTS_DIR", weights)
     monkeypatch.setitem(config.LIDAR, "tile_px", 256)
     monkeypatch.setitem(config.LIDAR, "infer_hillshades", ("g",))
-    monkeypatch.setattr(lidar, "_load_model_once", lambda: object())
+    stub = yolo_runtime.LoadedModel(model=object(), kind="stub", names={}, batch=8)
+    monkeypatch.setattr(lidar, "_load_model_once", lambda: stub)
     monkeypatch.setattr(yolo_runtime, "predict_tiles", _fake_predict)
     return tmp_path
 

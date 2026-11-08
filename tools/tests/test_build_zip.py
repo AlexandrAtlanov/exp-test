@@ -8,9 +8,9 @@ import zipfile
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
-import build_zip
 import pytest
 
+import build_zip
 from koz3 import config
 
 REPO_DIR = Path(__file__).resolve().parents[2]

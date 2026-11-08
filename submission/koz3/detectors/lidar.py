@@ -1,8 +1,12 @@
 """Детектор лидар: YOLO-seg на отмывках рельефа из LAS -> полигоны в UTM.
 
-Для каждого LAS строит отмывки бейзлайна (lidar_dem) во временной папке,
-режет каждую инференс-отмывку на тайлы с перекрытием, предсказывает маски
-и переводит их в полигоны в UTM региона. Список LAS берётся только из
+Для каждого LAS строит отмывки бейзлайна (lidar_dem) во временной папке и
+подаёт их модели одним из двух способов (LIDAR["infer_mode"]):
+- "whole" — как бейзлайн: вся отмывка сжата до LIDAR["whole_px"] и выровнена,
+  один кадр на отмывку (lidar_whole); так обучен model.pt бейзлайна;
+- "tiles" — нарезка на тайлы с перекрытием (как training/build_dataset.py);
+  дальше описан этот режим.
+Маски переводятся в полигоны в UTM региона. Список LAS берётся только из
 region.files["li"] (discovery) — один источник для is_available,
 estimate_seconds и run: рассинхрон паттернов поиска исключён (В1).
 Тайлы с долей валидных пикселей
@@ -39,7 +43,7 @@ from shapely.geometry import Polygon
 from .. import config, geometry, yolo_runtime
 from ..datatypes import Detection, Region
 from ..timing import Budget
-from . import lidar_dem
+from . import lidar_dem, lidar_whole
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +212,7 @@ def _process_las(
             las_path,
             region.utm_crs,
             Path(tmp_dir),
+            variants=variants,  # только нужные инференсу отмывки
         )
         by_variant = _match_hillshades(tif_paths, cfg)
         for variant in variants:
@@ -398,6 +403,8 @@ def _predict_hillshade(
         raster = _Raster(transform=src.transform, crs=src.crs, height=src.height, width=src.width)
         bands = src.read()
     image = yolo_runtime.to_model_image(bands)
+    if str(cfg.LIDAR.get("infer_mode", "tiles")) == "whole":
+        return _predict_whole(image, raster, region, las_path, variant, model, cfg)
     tiles = _make_tiles(image, int(cfg.LIDAR["tile_px"]), float(cfg.LIDAR["overlap"]))
     tiles, nodata_tiles = _valid_tiles(
         tiles,
@@ -429,6 +436,75 @@ def _predict_hillshade(
         variant,
         len(tiles),
         nodata_tiles,
+        len(detections),
+        time.monotonic() - started_s,
+    )
+    return detections
+
+
+def _predict_whole(
+    image: np.ndarray,
+    raster: _Raster,
+    region: Region,
+    las_path: Path,
+    variant: str,
+    model: yolo_runtime.LoadedModel,
+    cfg: ModuleType,
+) -> list[Detection]:
+    """Режим бейзлайна: вся отмывка → сжатие до whole_px → выравнивание → один кадр.
+
+    Маски кадра переводятся в CRS отмывки одним аффинным преобразованием
+    (lidar_whole.frame_to_raster), затем в UTM региона. Отмывка без валидных
+    пикселей модели не подаётся.
+    """
+    started_s = time.monotonic()
+    valid_share = float(yolo_runtime.valid_pixel_mask(image).mean())
+    if valid_share < float(cfg.LIDAR["min_valid_share"]):
+        logger.warning(
+            "li %s: %s, отмывка %s — нет данных (%.3f), инференс пропущен",
+            region.name,
+            las_path.name,
+            variant,
+            valid_share,
+        )
+        return []
+    whole_px = int(cfg.LIDAR["whole_px"])
+    frame, scale = lidar_whole.downscale_image(image, whole_px)
+    angle, crop_offset = 0.0, (0, 0)
+    center = (frame.shape[1] / 2.0, frame.shape[0] / 2.0)
+    if bool(cfg.LIDAR["whole_align"]):
+        frame, angle, crop_offset, center = lidar_whole.align_and_crop_image(frame)
+    frame = np.ascontiguousarray(frame)
+    pixel_to_raster = lidar_whole.frame_to_raster(
+        raster.transform, scale, angle, crop_offset, center
+    )
+    [instances] = list(yolo_runtime.predict_tiles(model, [frame], imgsz=whole_px))
+    detections: list[Detection] = []
+    for inst in instances:
+        for geom in geometry.mask_to_polygons(inst.mask, pixel_to_raster):
+            detections.append(
+                Detection(
+                    geom=_to_region_crs(geom, raster.crs, region),
+                    class_name=inst.class_name,
+                    confidence=inst.confidence,
+                    markup_type=MARKUP_TYPE,
+                    region_name=region.name,
+                    source=f"{las_path.name}:{variant}",
+                    extra={"edge_cut": False},
+                )
+            )
+    logger.info(
+        "li %s: %s, отмывка %s — целиком %dx%d → кадр %dx%d (масштаб %.3f, поворот %.1f°), "
+        "детекций %d за %.1f с",
+        region.name,
+        las_path.name,
+        variant,
+        raster.width,
+        raster.height,
+        frame.shape[1],
+        frame.shape[0],
+        scale,
+        angle,
         len(detections),
         time.monotonic() - started_s,
     )
