@@ -7,8 +7,10 @@
 Отличия от ноутбука:
 - маска съёмки строится только по растру (dist < palette_max_dist): на платформе
   нет контура съёмки (extra/*_границы.geojson) и разметки;
-- профили не обрабатываются (отдельный пайплайн): map_raster_paths их отфильтровывает,
-  признак «профиль?» у карт всегда False;
+- конвейер карт работает только с картами-срезами: map_raster_paths отфильтровывает
+  профили (признак «профиль?» у карт всегда False); профили — отдельная ветка
+  (profile_raster_paths, profile_extra): те же кандидаты + признаки глубины и карт
+  под полигоном;
 - torch и timm импортируются внутри функций: импорт модуля признаков не тянет их.
 
 Геометрии кандидатов остаются в CRS растра; в UTM их переводит детектор.
@@ -27,6 +29,7 @@ from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.transform import Affine
+from rasterio.windows import from_bounds
 from scipy import ndimage
 from scipy.spatial import cKDTree
 from shapely.geometry import Polygon
@@ -58,6 +61,21 @@ FEATURE_NAMES: tuple[str, ...] = (
     "профиль?",
 )
 """Имена признаков кандидата (ноутбук 02, ячейка 18); порядок = столбцы X."""
+
+PROFILE_EXTRA: tuple[str, ...] = (
+    "глубина верха, м",
+    "глубина низа, м",
+    "карты под полигоном: среднее",
+    "карты под полигоном: макс.",
+    "доля карт с аномалией",
+)
+"""Имена профильных признаков кандидата (ноутбук 02, ячейка 21); порядок = столбцы extra."""
+
+PROFILE_FEATURE_NAMES: tuple[str, ...] = FEATURE_NAMES + PROFILE_EXTRA
+"""Признаки кандидата профиля: 16 базовых + 5 профильных; порядок = столбцы X HGB."""
+
+MISSING: float = -9.0
+"""Значение отсутствующего признака (нет линии поверхности, нет карт, нет пикселей)."""
 
 NORM_MEAN = (0.485, 0.456, 0.406, 0.5)
 NORM_STD = (0.229, 0.224, 0.225, 0.5)
@@ -117,6 +135,11 @@ def is_profile_raster(raster: Path) -> bool:
 def map_raster_paths(files: Sequence[Path]) -> list[Path]:
     """Карты-срезы EtGr из растров региона; профили отфильтрованы."""
     return [f for f in files if not is_profile_raster(f)]
+
+
+def profile_raster_paths(files: Sequence[Path]) -> list[Path]:
+    """Профили EtGr из растров региона (ветка HGB, отдельный пайплайн)."""
+    return [f for f in files if is_profile_raster(f)]
 
 
 def load_field(raster: Path, cfg: Mapping[str, object]) -> EtGrField:
@@ -244,6 +267,70 @@ def nested_children(polys: Sequence[BaseGeometry], x: np.ndarray) -> list[list[i
             ):
                 kids[i].append(int(j))
     return kids
+
+
+def _profile_surface(field: EtGrField) -> tuple[np.ndarray, np.ndarray] | None:
+    """Линия поверхности профиля: (x, y) верхних валидных пикселей по столбцам.
+
+    Ноутбук 02, ячейка 21: линия есть только у растров шире, чем выше
+    (профили лежат горизонтально, глубина — вниз от линии); иначе None.
+    """
+    m = field.mask
+    if m.shape[1] <= m.shape[0]:
+        return None
+    cols = np.where(m.any(0))[0]
+    top = np.array([np.argmax(m[:, c]) for c in cols])
+    x, y = rasterio.transform.xy(field.transform, top, cols)
+    return np.asarray(x), np.asarray(y)
+
+
+def mean_under(poly: BaseGeometry, field: EtGrField, sign: float) -> float:
+    """Среднее sign * z карты field под полигоном (ноутбук 02, ячейка 21).
+
+    Сетки карт одного участка немного различаются — окно берётся по
+    координатам полигона в сетке карты; полигон вне сетки или под маской
+    меньше 3 пикселей — NaN.
+    """
+    height, width = field.z.shape
+    win = from_bounds(*poly.bounds, transform=field.transform).round_offsets().round_lengths()
+    r0, c0 = max(int(win.row_off), 0), max(int(win.col_off), 0)
+    r1 = min(int(win.row_off + win.height) + 1, height)
+    c1 = min(int(win.col_off + win.width) + 1, width)
+    if r1 <= r0 or c1 <= c0:
+        return np.nan
+    tr = field.transform * field.transform.translation(c0, r0)
+    m = rasterize(
+        [(poly, 1)], out_shape=(r1 - r0, c1 - c0), transform=tr, fill=0, all_touched=True
+    ).astype(bool)
+    m &= field.mask[r0:r1, c0:c1]
+    return float(sign * field.z[r0:r1, c0:c1][m].mean()) if m.sum() >= 3 else np.nan
+
+
+def profile_extra(
+    field: EtGrField,
+    cand_polys: Sequence[BaseGeometry],
+    cand_x: np.ndarray,
+    maps: Sequence[EtGrField],
+) -> np.ndarray:
+    """Профильные признаки кандидатов (N, 5), столбцы PROFILE_EXTRA (ноутбук 02, ячейка 21).
+
+    Глубины верха/низа — от линии поверхности профиля в координатах растра
+    (метры UTM); нет линии — MISSING. Карты под полигоном: среднее и
+    максимум sign * z по картам региона и доля карт с аномалией
+    (среднее > 0.5 уровня кандидата); нет карт или нет пикселей — MISSING.
+    """
+    out = np.full((len(cand_polys), len(PROFILE_EXTRA)), MISSING, np.float32)
+    surface = _profile_surface(field)
+    isign, ilvl = FEATURE_NAMES.index("знак"), FEATURE_NAMES.index("уровень")
+    for i, poly in enumerate(cand_polys):
+        if surface is not None:
+            y_surf = float(np.interp(poly.centroid.x, surface[0], surface[1]))
+            out[i, :2] = (y_surf - poly.bounds[3], y_surf - poly.bounds[1])
+        v = np.asarray([mean_under(poly, m, cand_x[i, isign]) for m in maps])
+        v = v[~np.isnan(v)]
+        if len(v):
+            out[i, 2:] = (v.mean(), v.max(), (v > 0.5 * cand_x[i, ilvl]).mean())
+    return out
 
 
 def crop_box(

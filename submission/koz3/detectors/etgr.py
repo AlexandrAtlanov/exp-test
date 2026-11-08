@@ -1,14 +1,22 @@
-"""Детектор электроразведки (EtGr): аномальные полигоны на картах-срезах.
+"""Детектор электроразведки (EtGr): аномальные полигоны на картах и профилях.
 
-Конвейер карты — общий код обучения и инференса
+Конвейер карт — общий код обучения и инференса
 ``koz3.geophys.etgr_features``: обращение шкалы jet, кандидаты-изолинии,
 окна CNN; детектор грузит ансамбль CNN из ``weights/etgr_maps.pt``
 (контракт training/train_etgr.py), скорит окна усреднением по
 отражениям (внутри predict_cnn) и сетям ансамбля, режет слившиеся
 пятна (predict_polys) и переводит полигоны из CRS растра в UTM региона:
-``object_poly``, markup_type «etgr». Профили не обрабатываются
-(``map_raster_paths`` их отфильтровывает). Без библиотек или при ошибке
-загрузки детектор выключается с предупреждением в лог — молча никогда.
+``object_poly``, markup_type «etgr».
+
+Профили — вторая, независимая ветка: те же кандидаты, профильные
+признаки (глубины, карты под полигоном — ``profile_extra``) и HGB из
+``weights/etgr_profiles.joblib`` (контракт training/train_etgr.py
+--kind profiles); NMS без разрезания пятен. Полигоны профиля лежат в
+вертикальном разрезе и на выход идут как есть — GT размечен так же.
+
+Отсутствие весов или ошибка одной ветки не отключает другую; без
+библиотек или при ошибке загрузки ветка выключается с предупреждением
+в лог — молча никогда.
 """
 
 import logging
@@ -59,6 +67,19 @@ _REQUIRED_KEYS: tuple[str, ...] = (
 обучении; torch может быть новее образа) детектор карт не использует.
 """
 
+_PROFILE_REQUIRED_KEYS: tuple[str, ...] = (
+    "clf",
+    "thr",
+    "feature_names",
+    "sklearn",
+)
+"""Обязательные ключи weights/etgr_profiles.joblib (train_etgr.py --kind profiles).
+
+clf — HGB с predict_proba на признаки PROFILE_FEATURE_NAMES; thr — порог
+OOF в [0, 1] (детектор применяет его в NMS, postprocess не режет повторно);
+sklearn — версия при обучении (расхождение — предупреждение).
+"""
+
 
 @dataclass
 class _EtGrNets:
@@ -72,31 +93,71 @@ _NETS_CACHE: dict[Path, _EtGrNets | None] = {}
 """Кеш ансамбля по пути файла весов: загрузка один раз на прогон."""
 
 
+@dataclass
+class _EtGrProfiles:
+    """HGB профилей EtGr и порог из файла весов."""
+
+    clf: Any  # sklearn-классификатор; Any — sklearn импортируется лениво
+    thr: float
+
+
+_PROFILES_CACHE: dict[Path, _EtGrProfiles | None] = {}
+"""Кеш HGB профилей по пути файла весов: загрузка один раз на прогон."""
+
+
 def is_available(region: Region) -> bool:
-    """True, если в регионе есть карты EtGr и ансамбль CNN грузится."""
-    if _load_nets(config) is None:
+    """True, если в регионе есть EtGr и готова хотя бы одна ветка.
+
+    Карты: есть карты-срезы и грузится ансамбль CNN. Профили: есть
+    профили и грузится HGB. Ветки независимы: нет весей одной — вторая
+    работает.
+    """
+    if ef is None:
         return False
-    assert ef is not None  # недостижимо при ef = None: _load_nets уже вернул None
-    return bool(ef.map_raster_paths(region.files.get("etgr", [])))
+    files = region.files.get("etgr", [])
+    if ef.map_raster_paths(files) and _load_nets(config) is not None:
+        return True
+    return bool(ef.profile_raster_paths(files)) and _load_profiles(config) is not None
 
 
 def estimate_seconds(region: Region) -> float:
-    """Оценка времени: карты региона × seconds_per_map (сетка <= work_side px)."""
+    """Оценка времени = сумме проверок бюджета внутри run.
+
+    Карты: карты × seconds_per_map (ветка CNN). Профили: профили ×
+    seconds_per_profile + карты × seconds_per_map — поля карт для
+    признаков профилей грузятся отдельно от ветки карт (конвейер карт
+    не меняется); оценки-заглушки до замера на платформе.
+    """
     if ef is None:
         return 0.0  # детектор выключен — бюджет не резервируем
-    maps = ef.map_raster_paths(region.files.get("etgr", []))
-    return len(maps) * float(config.ETGR["seconds_per_map"])
+    files = region.files.get("etgr", [])
+    maps = ef.map_raster_paths(files)
+    profiles = ef.profile_raster_paths(files)
+    per_map_s = float(config.ETGR["seconds_per_map"])
+    est_s = len(maps) * per_map_s
+    if profiles:
+        est_s += len(profiles) * float(config.ETGR["seconds_per_profile"]) + len(maps) * per_map_s
+    return est_s
 
 
 def run(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
-    """Детекции региона: полигоны object_poly в UTM (markup_type «etgr»).
+    """Детекции региона: карты (CNN) и профили (HGB) в UTM, markup_type «etgr».
 
-    Ансамбль грузится один раз (кеш по пути весов); бюджет проверяется
-    перед каждой картой; ошибка карты не роняет прогон.
+    Карты важнее: при нехватке бюджета профили пропускаются первыми.
+    Модели грузятся один раз (кеш по пути весов); бюджет проверяется
+    перед каждым файлом; ошибка файла или ветки не роняет прогон.
     """
+    detections: list[Detection] = []
+    detections.extend(_run_maps(region, budget, cfg))
+    detections.extend(_run_profiles(region, budget, cfg))
+    return detections
+
+
+def _run_maps(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
+    """Детекции карт региона (ансамбль CNN); без модели — пусто с предупреждением."""
     nets = _load_nets(cfg)
     if nets is None:
-        logger.warning("etgr: регион %s без моделей — детектор пропущен", region.name)
+        logger.warning("etgr: регион %s без модели карт — ветка карт пропущена", region.name)
         return []
     assert ef is not None  # недостижимо при ef = None: _load_nets уже вернул None
     per_map_s = float(cfg.ETGR["seconds_per_map"])
@@ -152,6 +213,108 @@ def _score(nets: list[Any], crops: np.ndarray) -> np.ndarray:
     return np.mean([ef.predict_cnn(net, crops) for net in nets], axis=0)
 
 
+def _run_profiles(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
+    """Детекции профилей региона (HGB); без модели — пусто с предупреждением.
+
+    Признакам профилей нужны поля карт региона («карты под полигоном»):
+    они грузятся здесь отдельно — конвейер карт не меняется. Карта не
+    читается или не лезет в бюджет — её признаки остаются MISSING.
+    """
+    profiles = _load_profiles(cfg)
+    if profiles is None:
+        logger.warning(
+            "etgr: регион %s без модели профилей — ветка профилей пропущена", region.name
+        )
+        return []
+    assert ef is not None  # недостижимо при ef = None: _load_profiles уже вернул None
+    files = region.files.get("etgr", [])
+    per_map_s = float(cfg.ETGR["seconds_per_map"])
+    map_fields: list[Any] = []
+    for map_path in ef.map_raster_paths(files):
+        if not budget.can_afford(per_map_s):
+            logger.warning(
+                "etgr: %s пропущен для признаков профилей — не хватает бюджета "
+                "(оценка %.1f с)",
+                map_path.name,
+                per_map_s,
+            )
+            continue
+        try:
+            map_fields.append(ef.load_field(map_path, cfg.ETGR))
+        except Exception as exc:
+            logger.warning("etgr: %s не читается для признаков профилей (%s)", map_path.name, exc)
+    per_profile_s = float(cfg.ETGR["seconds_per_profile"])
+    detections: list[Detection] = []
+    for raster_path in ef.profile_raster_paths(files):
+        if not budget.can_afford(per_profile_s):
+            logger.warning(
+                "etgr: профиль %s пропущен — не хватает бюджета (оценка %.1f с)",
+                raster_path.name,
+                per_profile_s,
+            )
+            continue
+        detections.extend(_run_profile_raster(raster_path, region, profiles, map_fields, cfg))
+    return detections
+
+
+def _run_profile_raster(
+    raster_path: Path,
+    region: Region,
+    profiles: _EtGrProfiles,
+    map_fields: list[Any],
+    cfg: ModuleType,
+) -> list[Detection]:
+    """Детекции одного профиля; ошибки чтения и конвейера изолированы."""
+    try:
+        field = ef.load_field(raster_path, cfg.ETGR)
+    except Exception as exc:
+        logger.warning("etgr: профиль %s пропущен (%s)", raster_path.name, exc)
+        return []
+    try:
+        return _profile_detections(field, raster_path.name, region, profiles, map_fields, cfg)
+    except Exception as exc:
+        logger.warning("etgr: %s: профиль пропущен (%s)", raster_path.name, exc)
+        return []
+
+
+def _profile_detections(
+    field: Any,
+    raster_name: str,
+    region: Region,
+    profiles: _EtGrProfiles,
+    map_fields: list[Any],
+    cfg: ModuleType,
+) -> list[Detection]:
+    """Конвейей профиля: кандидаты → признаки → HGB → NMS → UTM.
+
+    field — EtGrField профиля; map_fields — поля карт региона для
+    признаков «карты под полигоном». Полигоны лежат в вертикальном
+    разрезе и на выход идут как есть (GT размечен так же); NMS — без
+    разрезания пятен (ноутбук 02, predict_polys для профилей).
+    """
+    cand_polys, cand_x = ef.candidates(field, cfg.ETGR)
+    if not cand_polys:
+        return []
+    extra = ef.profile_extra(field, cand_polys, cand_x, map_fields)
+    features = np.hstack([cand_x, extra])
+    scores = _predict_clf(profiles.clf, features)
+    keep = ef.nms(cand_polys, scores, profiles.thr, cfg.ETGR)
+    polys = [cand_polys[i] for i in keep]
+    confs = [float(scores[i]) for i in keep]
+    return _to_detections(field, polys, confs, raster_name, region)
+
+
+def _predict_clf(clf: Any, features: np.ndarray) -> np.ndarray:
+    """Вероятности HGB (N,); NaN/Inf -> -1 (ниже любого порога)."""
+    proba = np.asarray(clf.predict_proba(features), dtype=np.float64)
+    if proba.ndim != 2 or proba.shape != (len(features), 2):
+        raise ValueError(
+            f"predict_proba вернул форму {proba.shape}, ожидалась ({len(features)}, 2)"
+        )
+    positive = proba[:, 1]
+    return np.where(np.isfinite(positive), np.clip(positive, 0.0, 1.0), -1.0)
+
+
 def _to_detections(
     field: Any,
     polys: Sequence[BaseGeometry],
@@ -159,7 +322,7 @@ def _to_detections(
     raster_name: str,
     region: Region,
 ) -> list[Detection]:
-    """Полигоны карты в детекции: CRS растра → UTM региона → object_poly."""
+    """Полигоны растра (карта или профиль) в детекции: CRS → UTM, object_poly."""
     same_crs = field.crs == CRS.from_user_input(region.utm_crs)
     detections: list[Detection] = []
     for geom_src, conf in zip(polys, confs, strict=True):
@@ -272,6 +435,77 @@ def _check_crop(crop: Any, cfg: ModuleType) -> None:
     if crop != expected:
         raise ValueError(
             f"crop={crop!r}, окно инференса {expected!r} — модель на других окнах"
+        )
+
+
+def _load_profiles(cfg: ModuleType) -> _EtGrProfiles | None:
+    """HGB профилей из кеша или из файла весов; None — ветка выключена."""
+    weights_path = Path(cfg.WEIGHTS_DIR) / str(cfg.ETGR["profiles_models_file"])
+    if weights_path in _PROFILES_CACHE:
+        return _PROFILES_CACHE[weights_path]
+    profiles: _EtGrProfiles | None = None
+    if ef is None:
+        logger.warning(
+            "etgr: нет библиотек модуля признаков (%s) — профили выключены", _IMPORT_ERROR
+        )
+    elif not weights_path.is_file():
+        logger.debug("etgr: нет файла весов %s — профили выключены", weights_path)
+    else:
+        try:
+            profiles = _read_profiles(weights_path)
+        except Exception as exc:
+            logger.warning("etgr: профили выключены — %s не загружен (%s)", weights_path, exc)
+    _PROFILES_CACHE[weights_path] = profiles
+    return profiles
+
+
+def _read_profiles(weights_path: Path) -> _EtGrProfiles:
+    """Читает weights/etgr_profiles.joblib и проверяет контракт обучения.
+
+    Формат: dict с ключами _PROFILE_REQUIRED_KEYS: clf (HGB с
+    predict_proba), thr (порог OOF в [0, 1]), feature_names
+    (PROFILE_FEATURE_NAMES — модель на других признаках = ошибка),
+    sklearn (версия при обучении). Без joblib/sklearn в образе —
+    исключение, ветка выключается с предупреждением.
+    """
+    try:
+        import joblib
+    except ImportError as exc:
+        raise RuntimeError("нет joblib в образе") from exc
+    raw = joblib.load(weights_path)
+    if not isinstance(raw, dict):
+        raise TypeError(f"в файле {type(raw).__name__}, ожидался dict")
+    missing = [key for key in _PROFILE_REQUIRED_KEYS if key not in raw]
+    if missing:
+        raise KeyError("нет ключей: " + ", ".join(missing))
+    if not callable(getattr(raw["clf"], "predict_proba", None)):
+        raise TypeError("clf без predict_proba")
+    _check_profile_feature_names(raw["feature_names"])
+    _warn_sklearn_mismatch(raw["sklearn"])
+    return _EtGrProfiles(clf=raw["clf"], thr=_as_threshold(raw["thr"], "thr"))
+
+
+def _check_profile_feature_names(names: Any) -> None:
+    """Имена признаков из файла весов = PROFILE_FEATURE_NAMES etgr_features."""
+    actual = list(names) if names is not None else []
+    if actual != list(ef.PROFILE_FEATURE_NAMES):
+        raise ValueError(
+            f"feature_names не совпадает с etgr_features: {len(actual)} имён "
+            f"вместо {len(ef.PROFILE_FEATURE_NAMES)} — модель на других признаках"
+        )
+
+
+def _warn_sklearn_mismatch(trained_version: Any) -> None:
+    """Предупреждение о несовпадении версии sklearn (не отказ)."""
+    try:
+        installed = metadata.version("scikit-learn")
+    except metadata.PackageNotFoundError:
+        return
+    if str(trained_version) != installed:
+        logger.warning(
+            "etgr: sklearn %s при обучении, в образе %s — возможны расхождения",
+            trained_version,
+            installed,
         )
 
 

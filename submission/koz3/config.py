@@ -201,6 +201,8 @@ ETGR: dict[str, object] = {
     "crop_px": 128,  # окно кандидата для CNN, px
     "models_file": "etgr_maps.pt",  # файл весов в WEIGHTS_DIR (training/train_etgr.py)
     "seconds_per_map": 20.0,  # ЗАГЛУШКА: оценка до замера на платформе; уточнить по логам прогона
+    "profiles_models_file": "etgr_profiles.joblib",  # HGB профилей (train_etgr.py --kind profiles)
+    "seconds_per_profile": 20.0,  # ЗАГЛУШКА: профиль + поля карт региона для его признаков
 }
-"""Электроразведка (EtGr), карты-срезы: обращение шкалы jet, кандидаты-изолинии,
-окна CNN (ноутбук 02 организаторов). Профили — отдельный пайплайн, не здесь."""
+"""Электроразведка (EtGr): карты-срезы (обращение шкалы jet, кандидаты-изолинии,
+окна CNN) и профили (HGB по PROFILE_FEATURE_NAMES) — ноутбук 02 организаторов."""
