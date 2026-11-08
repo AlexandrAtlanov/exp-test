@@ -131,3 +131,12 @@ MODEL_CLASS_ALIASES: dict[str, str] = {"kurgany": "kurgany_tselye"}
 
 HILLSHADE_NODATA: dict[str, int] = {"c": 0, "ch": 0, "g": 255, "i": 255}
 """Значение «нет данных» в хиллшейдах бейзлайна: цветные — 0, серые — 255."""
+
+MAGGR = {
+    "res_m": 0.1, "mask_erode_px": 2, "gray_glob": "*_серый.tif",
+    "pt_smooth": 1.5, "pt_min_dist": 5, "pt_min_z": 1.0, "pt_dipole_win_px": 15,
+    "pt_label_m": 0.5, "pt_nms_m": 1.5,
+    "poly_res": 0.25, "smooth": 2, "bg_sigmas": (0, 40, 20),
+    "levels": (0.5, 1.0, 1.5, 2.0, 2.5), "min_cand_m2": 4.0,
+    "nms_iou": 0.2, "nms_cover": 0.5, "label_iou": 0.1,
+}
