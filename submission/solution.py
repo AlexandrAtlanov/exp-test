@@ -114,11 +114,13 @@ def _load_detectors() -> list[ModuleType]:
         full_name = f"{DETECTORS_PACKAGE}.{name}"
         try:
             module = importlib.import_module(full_name)
-        except ImportError as exc:
-            raise ValueError(f"детектор {full_name} не импортируется: {exc}") from exc
+        except Exception:  # noqa: BLE001  # один сломанный детектор не выключает остальные
+            logger.exception("детектор %s не импортируется — пропущен", full_name)
+            continue
         missing = [attr for attr in _DETECTOR_API if not hasattr(module, attr)]
         if missing:
-            raise ValueError(f"детектор {full_name} нарушает контракт, нет: {missing}")
+            logger.error("детектор %s нарушает контракт, нет: %s — пропущен", full_name, missing)
+            continue
         modules.append(module)
     modules.sort(key=lambda module: (int(module.PRIORITY), module.__name__))
     for module in modules:

@@ -56,6 +56,9 @@ class LoadedModel:
     kind: str  # "engine" | "pt"
     names: dict[int, str]
     batch: int
+    imgsz: int | None = None  # вход модели при обучении (из .pt); None — config.YOLO["imgsz"]
+    tile_px: int | None = None  # тайл обучения из паспорта .pt.json; None — config.LIDAR
+    scales: tuple[float, ...] | None = None  # масштабы инференса; None — config.LIDAR["scales"]
 
 
 def to_model_image(array: np.ndarray) -> np.ndarray:
@@ -89,7 +92,11 @@ def valid_pixel_mask(image: np.ndarray) -> np.ndarray:
     LIDAR["min_valid_share"] (инференс) / settings.MIN_VALID_SHARE (трейн).
     """
     data = np.asarray(image)
-    return ~(np.all(data == 0, axis=-1) | np.all(data == 255, axis=-1))
+    # поканальные сравнения вместо np.all(axis=-1): тот же результат, в ~7 раз быстрее
+    c0, c1, c2 = data[..., 0], data[..., 1], data[..., 2]
+    zero = (c0 == 0) & (c1 == 0) & (c2 == 0)
+    full = (c0 == 255) & (c1 == 255) & (c2 == 255)
+    return ~(zero | full)
 
 
 def tile_positions(length_px: int, tile_px: int, overlap: float) -> list[int]:
@@ -132,10 +139,22 @@ def _engine_compatible(engine_path: Path) -> tuple[bool, str]:
     return True, "ок"
 
 
+def _train_imgsz(model: object) -> int | None:
+    """imgsz, на котором обучены веса .pt (train_args чекпойнта); None — неизвестно.
+
+    Инференс подаёт модели тот же размер: model.pt бейзлайна — 1024, наша — 512.
+    Раньше imgsz брался только из config и для model.pt его приходилось менять руками.
+    """
+    ckpt = getattr(model, "ckpt", None)
+    train_args = ckpt.get("train_args", {}) if isinstance(ckpt, dict) else {}
+    train_imgsz = train_args.get("imgsz") if isinstance(train_args, dict) else None
+    return train_imgsz if isinstance(train_imgsz, int) and train_imgsz > 0 else None
+
+
 def _warn_class_names(names: dict[int, str]) -> None:
     """Предупредить о расхождении классов весов и SURFACE_CLASSES (после алиасов)."""
     surface = set(config.SURFACE_CLASSES)
-    model_classes = {config.MODEL_CLASS_ALIASES.get(name, name) for name in names.values()}
+    model_classes = {alias for name in names.values() for alias in _our_classes(name)}
     unknown = sorted(model_classes - surface)
     if unknown:
         logger.warning(
@@ -189,12 +208,46 @@ def load_model(weights_dir: Path | None = None) -> LoadedModel:
     model = YOLO(str(pt_path), task="segment")
     names = {int(k): v for k, v in model.names.items()}
     _warn_class_names(names)
-    logger.info("YOLO: загружен %s, классы %s", pt_path.name, list(names.values()))
-    return LoadedModel(model, "pt", names, int(params["batch"]))
+    imgsz = _train_imgsz(model)
+    tile_px, scales = _passport_tiling(pt_path)
+    logger.info(
+        "YOLO: загружен %s, классы %s, imgsz %s, тайл %s, масштабы %s",
+        pt_path.name,
+        list(names.values()),
+        imgsz if imgsz is not None else f"{params['imgsz']} (из config)",
+        tile_px or "из config",
+        scales or "из config",
+    )
+    return LoadedModel(model, "pt", names, int(params["batch"]), imgsz, tile_px, scales)
 
 
-def predict_tiles(loaded: LoadedModel, tiles: list[np.ndarray]) -> Iterator[list[TileInstance]]:
+def _passport_tiling(pt_path: Path) -> tuple[int | None, tuple[float, ...] | None]:
+    """Тайл и масштабы из паспорта <веса>.pt.json (пишет training/train.py).
+
+    Наша модель обучена на тайлах tile_px одного масштаба — инференс повторяет это:
+    тот же тайл и масштаб (1,), если в паспорте не указано "scales". Нет паспорта
+    (model.pt бейзлайна) — (None, None): берутся LIDAR["tile_px"] и LIDAR["scales"].
+    """
+    path = pt_path.with_suffix(".pt.json")
+    if not path.is_file():
+        return None, None
+    try:
+        passport = json.loads(path.read_text(encoding="utf-8"))
+        tile_px = int(passport["tile_px"])
+        scales = tuple(float(k) for k in passport.get("scales", (1,)))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("паспорт %s не читается (%s) — тайл и масштабы из config", path.name, exc)
+        return None, None
+    return tile_px, scales
+
+
+def predict_tiles(
+    loaded: LoadedModel, tiles: list[np.ndarray], imgsz: int | None = None
+) -> Iterator[list[TileInstance]]:
     """Предсказать маски для тайлов RGB uint8; по одному списку на тайл, в том же порядке.
+
+    imgsz — размер входа модели; None — imgsz обучения весов (loaded.imgsz), если он
+    известен, иначе config.YOLO["imgsz"].
 
     Имена классов модели переводятся через config.MODEL_CLASS_ALIASES; классы,
     которых и после этого нет в config.SURFACE_CLASSES, отбрасываются с
@@ -213,7 +266,7 @@ def predict_tiles(loaded: LoadedModel, tiles: list[np.ndarray]) -> Iterator[list
         sources = [np.ascontiguousarray(tile[..., ::-1]) for tile in chunk]
         results = loaded.model.predict(
             source=sources,
-            imgsz=int(params["imgsz"]),
+            imgsz=int(imgsz or loaded.imgsz or params["imgsz"]),
             conf=float(params["conf"]),
             iou=float(params["iou"]),
             max_det=int(params["max_det"]),
@@ -276,12 +329,17 @@ def _instances(
     for mask, class_id, conf in zip(masks, classes, confs, strict=True):
         cid = int(class_id)
         raw_name = names.get(cid, "")
-        class_name = config.MODEL_CLASS_ALIASES.get(raw_name, raw_name)
-        if class_name not in surface:
-            _count_rejected_class(cid, raw_name, class_name)
-            continue
         if mask.shape != (height, width):
             _warn_mask_shape(mask.shape, (height, width))
             continue
-        found.append(TileInstance(class_name, float(conf), mask))
+        for class_name in _our_classes(raw_name):
+            if class_name not in surface:
+                _count_rejected_class(cid, raw_name, class_name)
+                continue
+            found.append(TileInstance(class_name, float(conf), mask))
     return found
+
+
+def _our_classes(raw_name: str) -> tuple[str, ...]:
+    """Наши классы для имени класса модели (config.MODEL_CLASS_ALIASES; иначе — как есть)."""
+    return tuple(config.MODEL_CLASS_ALIASES.get(raw_name, (raw_name,)))
