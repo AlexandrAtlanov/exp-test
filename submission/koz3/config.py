@@ -18,7 +18,7 @@ WEIGHTS_DIR: Path = Path(__file__).resolve().parent.parent / "weights"
 LOG_LEVEL: str = "INFO"
 """Уровень logging в solution.py."""
 
-ENABLED_DETECTORS: tuple[str, ...] = ("lidar", "maggr")
+ENABLED_DETECTORS: tuple[str, ...] = ("lidar", "maggr", "etgr")
 """Имена модулей-детекторов из koz3.detectors; заполняется по мере готовности."""
 
 DEFAULT_CONF_THRESHOLD: float = 0.25
@@ -26,13 +26,13 @@ DEFAULT_CONF_THRESHOLD: float = 0.25
 
 SRC_CRS: str = "EPSG:3857"
 
-# Заглушка: рабочие пороги подбираются. maggr: порог уже применён детектором
-# (thr_points / thr_polys из файла весов, подобран по OOF) — postprocess не режет повторно.
+# Заглушка: рабочие пороги подбираются. maggr и etgr: порог уже применён детектором
+# (thr_points / thr_polys / thr из файла весов, подобран по OOF) — postprocess не режет повторно.
 CONF_THRESHOLD: dict[tuple[str, str], float] = {
     ("finds_points", "maggr"): 0.0,
     ("object_poly", "maggr"): 0.0,
+    ("object_poly", "etgr"): 0.0,
 }
-"""Пороги по парам (class_name, markup_type) для postprocess."""
 
 NMS_IOU: float = 0.5
 """NMS: подавлять при IoU > NMS_IOU; только внутри (class_name, markup_type)."""
@@ -200,6 +200,7 @@ ETGR: dict[str, object] = {
     "split_ratio": 0.5,  # пятно режется на детей со score >= split_ratio * порог
     "crop_px": 128,  # окно кандидата для CNN, px
     "models_file": "etgr_maps.pt",  # файл весов в WEIGHTS_DIR (training/train_etgr.py)
+    "seconds_per_map": 20.0,  # ЗАГЛУШКА: оценка до замера на платформе; уточнить по логам прогона
 }
 """Электроразведка (EtGr), карты-срезы: обращение шкалы jet, кандидаты-изолинии,
 окна CNN (ноутбук 02 организаторов). Профили — отдельный пайплайн, не здесь."""
