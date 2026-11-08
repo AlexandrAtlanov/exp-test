@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
-import make_holdout
 import pytest
 
+import make_holdout
 from koz3 import discovery
 
 REGION = "207_Альфа"
