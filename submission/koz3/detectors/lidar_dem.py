@@ -381,19 +381,30 @@ def hillshade_esri(
     return np.clip(shade, 0.0, 255.0)
 
 
+_HSV_PICK = {
+    "r": np.array([0, 1, 2, 2, 3, 0]),
+    "g": np.array([3, 0, 0, 1, 2, 2]),
+    "b": np.array([2, 2, 3, 0, 0, 1]),
+}
+"""Для сектора i = 0..5 — какой из (val, q, p, t) идёт в канал (классическая схема HSV→RGB)."""
+
+
 def hsv_to_rgb_u8(hue: np.ndarray, sat: np.ndarray, val: np.ndarray) -> np.ndarray:
-    """Векторный HSV→RGB (uint8, поканально) без зависимости от matplotlib."""
+    """Векторный HSV→RGB (uint8, поканально) без зависимости от matplotlib.
+
+    Выбор значения по сектору — take_along_axis по стеку (val, q, p, t): те же
+    числа, что np.select по 6 условиям, но один проход на канал (в ~2 раза
+    быстрее). Побитное совпадение с бейзлайном проверяет test_lidar_dem.
+    """
     h = (np.asarray(hue) % 1.0) * 6.0
     i = np.floor(h).astype(np.int32) % 6
     f = h - np.floor(h)
     p = val * (1.0 - sat)
     q = val * (1.0 - sat * f)
     t = val * (1.0 - sat * (1.0 - f))
-    conds = [i == 0, i == 1, i == 2, i == 3, i == 4, i == 5]
-    r = np.select(conds, [val, q, p, p, t, val])
-    g = np.select(conds, [t, val, val, q, p, p])
-    b = np.select(conds, [p, p, t, val, val, q])
-    rgb = np.stack([r, g, b]).astype(np.float32)
+    stack = np.stack(np.broadcast_arrays(val, q, p, t))
+    channels = [np.take_along_axis(stack, _HSV_PICK[c][i][None], 0)[0] for c in "rgb"]
+    rgb = np.stack(channels).astype(np.float32)
     return np.clip(np.rint(rgb * 255.0), 0, 255).astype(np.uint8)
 
 
@@ -566,15 +577,26 @@ def make_hillshade_set(
     return written
 
 
-def hillshades_for_las(las_path: Path, region_crs: str, out_dir: Path) -> List[Path]:
-    """Хиллшейды LAS с параметрами config.LIDAR; пути к tif в порядке c, ch, g, i."""
+def hillshades_for_las(
+    las_path: Path,
+    region_crs: str,
+    out_dir: Path,
+    variants: Optional[Iterable[str]] = None,
+) -> List[Path]:
+    """Хиллшейды LAS с параметрами config.LIDAR; пути к tif в порядке c, ch, g, i.
+
+    variants — какие отмывки строить (по умолчанию config.LIDAR["hillshades"]).
+    Детектор передаёт только LIDAR["infer_hillshades"]: ненужные варианты не
+    считаются (цветные — самые дорогие). Пиксели каждого варианта от набора
+    не зависят.
+    """
     if not Path(las_path).is_file():
         raise FileNotFoundError(f"нет LAS-файла: {las_path}")
     return make_hillshade_set(
         Path(las_path),
         Path(out_dir),
         res=float(config.LIDAR["res_m"]),
-        modalities=tuple(config.LIDAR["hillshades"]),
+        modalities=tuple(config.LIDAR["hillshades"] if variants is None else variants),
         max_pixels=int(config.LIDAR.get("max_pixels", 60_000_000)),
         region_crs=region_crs,
     )

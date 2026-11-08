@@ -12,14 +12,9 @@ from __future__ import annotations
 
 import json
 import math
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-for _entry in (ROOT / "submission", ROOT / "tools"):
-    if str(_entry) not in sys.path:
-        sys.path.insert(0, str(_entry))
-
+import _bootstrap  # noqa: F401
 from shapely.geometry import box
 
 import solution
@@ -28,6 +23,7 @@ from koz3 import config, output, postprocess
 from koz3.datatypes import CLASSES, Detection, Region
 from koz3.geometry import point_to_circle
 
+ROOT = Path(__file__).resolve().parents[2]
 REGION_NAME = "synth_region"
 UTM = "EPSG:32637"
 _PROP_KEYS = {"class_name", "confidence", "markup_type", "region_name", "fid"}
@@ -48,9 +44,7 @@ def _det(class_name, markup_type, confidence, geom, region_name=REGION_NAME):
 
 
 def _threshold_for(class_name, markup_type):
-    return config.CONF_THRESHOLD.get(
-        (class_name, markup_type), config.DEFAULT_CONF_THRESHOLD
-    )
+    return config.CONF_THRESHOLD.get((class_name, markup_type), config.DEFAULT_CONF_THRESHOLD)
 
 
 def _side_for(class_name, factor=2.0, minimum=5.0):
@@ -148,19 +142,24 @@ def test_full_pipeline_validator_clean(tmp_path):
     for cls in sorted(CLASSES):
         for markup in ("li", "or"):
             side = _side_for(cls)
-            detections.append(
-                _det(cls, markup, 0.9, box(cursor_x, 0.0, cursor_x + side, side))
-            )
+            detections.append(_det(cls, markup, 0.9, box(cursor_x, 0.0, cursor_x + side, side)))
             cursor_x += side + 10.0
     first_cls = sorted(CLASSES)[0]
     side = _side_for(first_cls)
     detections.append(_det(first_cls, "li", 0.05, box(cursor_x, 0.0, cursor_x + side, side)))
     detections.append(_det(first_cls, "or", 0.5, box(0.0, 0.0, side, side)))
     detections.append(
-        _det("definitely_not_a_class", "li", 0.9, box(cursor_x, 100.0, cursor_x + side, 100.0 + side))
+        _det(
+            "definitely_not_a_class",
+            "li",
+            0.9,
+            box(cursor_x, 100.0, cursor_x + side, 100.0 + side),
+        )
     )
     detections.append(
-        _det(first_cls, "li", 0.9, box(0.0, 200.0, side, 200.0 + side), region_name="unknown_region")
+        _det(
+            first_cls, "li", 0.9, box(0.0, 200.0, side, 200.0 + side), region_name="unknown_region"
+        )
     )
     detections.append(_det("finds_points", "maggr", 0.9, point_to_circle(cursor_x + 50.0, 50.0)))
 

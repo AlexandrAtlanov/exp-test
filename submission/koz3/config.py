@@ -18,7 +18,7 @@ WEIGHTS_DIR: Path = Path(__file__).resolve().parent.parent / "weights"
 LOG_LEVEL: str = "INFO"
 """Уровень logging в solution.py."""
 
-ENABLED_DETECTORS: tuple[str, ...] = ("lidar",)
+ENABLED_DETECTORS: tuple[str, ...] = ("lidar", "maggr")
 """Имена модулей-детекторов из koz3.detectors; заполняется по мере готовности."""
 
 DEFAULT_CONF_THRESHOLD: float = 0.25
@@ -26,8 +26,12 @@ DEFAULT_CONF_THRESHOLD: float = 0.25
 
 SRC_CRS: str = "EPSG:3857"
 
-# Заглушка: рабочие пороги подбираются
-CONF_THRESHOLD: dict[tuple[str, str], float] = {}
+# Заглушка: рабочие пороги подбираются. maggr: порог уже применён детектором
+# (thr_points / thr_polys из файла весов, подобран по OOF) — postprocess не режет повторно.
+CONF_THRESHOLD: dict[tuple[str, str], float] = {
+    ("finds_points", "maggr"): 0.0,
+    ("object_poly", "maggr"): 0.0,
+}
 """Пороги по парам (class_name, markup_type) для postprocess."""
 
 NMS_IOU: float = 0.5
@@ -89,16 +93,34 @@ LIDAR: dict[str, object] = {
     "max_pixels": 60_000_000,  # как в бейзлайне
     "hillshades": ("c", "ch", "g", "i"),
     "infer_hillshades": ("c", "ch", "g", "i"),  # отмывки для инференса
+    # тайл в пикселях отмывки (0.1 м → 102 м); модели подаётся сжатым до YOLO["imgsz"]
     "tile_px": 1024,
     "overlap": 0.3,
     # порог доли валидных пикселей тайла (не «все 0» / не «все 255»);
     # ниже — тайл пропускается на инференсе; равен settings.MIN_VALID_SHARE трейна
     "min_valid_share": 0.05,
     "seconds_per_gb": 60.0,  # оценка: секунд на ГБ LAS
+    # как модель видит отмывку:
+    #   "whole" — как бейзлайн: вся отмывка сжата до whole_px по длинной стороне, выровнена,
+    #             один кадр (так обучен model.pt бейзлайна; тайлы 0.1 м он почти не видит);
+    #   "tiles" — тайлы tile_px с перекрытием, сжатые до YOLO["imgsz"] (так строит датасет
+    #             training/build_dataset.py — для наших моделей).
+    # 08.11: whole дал 0.0 на платформе (большой тестовый регион сжимается до 1024 —
+    # курганы в несколько пикселей); тайлы 0.1 м дали 0.0138 (точность 0.74, полнота 0.03,
+    # только объекты < 500 м²). Поэтому тайлы на нескольких масштабах (scales).
+    "infer_mode": "tiles",
+    # масштабы тайлов: отмывка сжимается в k раз (0.1·k м/пикс), затем тайлы tile_px.
+    # v3 (1, 2, 4): 0.02822, но рост дали курганы в двух классах; TP целых курганов те же, что
+    # в v1 (Boundary IoU 0.036380 до знака), крупных объектов ни одного, точность лидара
+    # 0.74 → 0.56. Масштабы 2 и 4 добавили только FP → (1,). Наша модель — из паспорта.
+    "scales": (1,),
+    "whole_px": 1024,  # длинная сторона кадра и imgsz модели в режиме whole (как бейзлайн)
+    # выравнивание поворотом, как бейзлайн. Выключено: бейзлайн поворачивает в том же холсте,
+    # и у вытянутых отмывок поворот на 90° срезает до трети региона; масштаб от выравнивания
+    # не зависит. Включать только по результату holdout (evaluate.py --compare).
+    "whole_align": False,
 }
 """Параметры лидарного детектора: DEM, хиллшейды, нарезка на тайлы."""
-
-WEIGHTS_DIR: Path = Path(__file__).resolve().parent.parent / "weights"
 
 SURFACE_CLASSES: tuple[str, ...] = (
     "kurgany_tselye",
@@ -113,7 +135,9 @@ YOLO: dict[str, object] = {
     "weights_pt": "lidar_yolo.pt",
     "weights_engine": "lidar_yolo.engine",
     "prefer_engine": True,  # TensorRT engine, если есть файл и совместимая среда
-    "imgsz": 1024,
+    # размер входа модели: тайл LIDAR["tile_px"] сжимается до imgsz (1024 → 512 = 0.2 м/пикс).
+    # Одно значение для обучения (training/train.py) и инференса; смена — переобучение и engine.
+    "imgsz": 512,
     "half": True,  # FP16 для .pt; engine уже собран в FP16
     "batch": 8,  # тайлов за вызов predict (engine с batch=1 гоняется по одному)
     "conf": 0.05,  # низкий порог модели; рабочие пороги — CONF_THRESHOLD в postprocess
@@ -123,10 +147,40 @@ YOLO: dict[str, object] = {
 }
 """Параметры инференса YOLO-seg; веса лежат в WEIGHTS_DIR."""
 
-MODEL_CLASS_ALIASES: dict[str, str] = {"kurgany": "kurgany_tselye"}
-"""Имена классов чужих моделей → наши. Модель бейзлайна (model.pt) называет курганы
-«kurgany» — без этой записи все её курганы отбрасывались бы. Наша модель обучена
-сразу на SURFACE_CLASSES и в переименовании не нуждается."""
+MODEL_CLASS_ALIASES: dict[str, tuple[str, ...]] = {
+    "kurgany": ("kurgany_tselye", "kurgany_povrezhdennye"),
+}
+"""Имена классов чужих моделей → наши (одно имя модели может дать несколько классов).
+
+Модель бейзлайна (model.pt) знает один класс курганов «kurgany» и не отличает
+целые от повреждённых. Каждый её курган выдаётся в ОБА класса: метрика считает F1
+по классам независимо, поэтому целые не страдают, а повреждённые (вес 30 — самый
+большой) перестают давать 0. Лишние предсказания в чужом классе — FP с весом 0.5.
+Наша модель обучена сразу на SURFACE_CLASSES и в переименовании не нуждается."""
 
 HILLSHADE_NODATA: dict[str, int] = {"c": 0, "ch": 0, "g": 255, "i": 255}
 """Значение «нет данных» в хиллшейдах бейзлайна: цветные — 0, серые — 255."""
+
+MAGGR: dict[str, object] = {
+    "res_m": 0.1,
+    "mask_erode_px": 2,
+    "gray_glob": "*_серый.tif",
+    "pt_smooth": 1.5,
+    "pt_min_dist": 5,
+    "pt_min_z": 1.0,
+    "pt_dipole_win_px": 15,
+    "pt_label_m": 0.5,
+    "pt_nms_m": 1.5,
+    "poly_res": 0.25,
+    "smooth": 2,
+    "bg_sigmas": (0, 40, 20),
+    "levels": (0.5, 1.0, 1.5, 2.0, 2.5),
+    "min_cand_m2": 4.0,
+    "nms_iou": 0.2,
+    "nms_cover": 0.5,
+    "label_iou": 0.1,
+    "models_file": "maggr_models.joblib",  # файл весов в WEIGHTS_DIR (train_maggr.py)
+    "seconds_per_mpx": 6.0,  # замер 08.11: ~6–8 с на Мпикс рабочей сетки (CPU)
+}
+"""Магниторазведка (MagGr): сетка 0.1 м, кандидаты точек (pt_*) и полигонов, пороги NMS.
+Константы формул признаков — в koz3/geophys/maggr_features.py (_PT_*, _POLY_*)."""

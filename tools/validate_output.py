@@ -155,9 +155,7 @@ def validate(path: str | Path) -> dict[str, Any]:
         report["examples"] = examples
     report["classes"] = dict(
         Counter(
-            f.get("properties", {}).get("class_name", "?")
-            for f in features
-            if isinstance(f, dict)
+            f.get("properties", {}).get("class_name", "?") for f in features if isinstance(f, dict)
         )
     )
     return report

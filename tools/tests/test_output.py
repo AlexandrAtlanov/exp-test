@@ -7,8 +7,9 @@ from pathlib import Path
 
 import _bootstrap  # noqa: F401  # добавляет submission/ в sys.path
 import pytest
-from koz3 import config, output
 from shapely.geometry import MultiPolygon, Polygon, mapping
+
+from koz3 import config, output
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import validate_output  # noqa: E402

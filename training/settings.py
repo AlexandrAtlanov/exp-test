@@ -89,7 +89,9 @@ HILLSHADES: tuple[str, ...] = tuple(runtime_config.LIDAR["hillshades"])
 
 # Шаг DEM и лимит пикселей — в koz3.config.LIDAR (общие с инференсом).
 
-TILE_PX: int = int(runtime_config.YOLO["imgsz"])
+TILE_PX: int = int(runtime_config.LIDAR["tile_px"])
+"""Размер тайла датасета в пикселях отмывки — как на инференсе (LIDAR["tile_px"]).
+Модель видит тайл сжатым до YOLO["imgsz"] (train.py); датасет при смене imgsz не пересобирается."""
 TILE_OVERLAP: float = 0.25
 NEGATIVE_TILE_SHARE: float = 0.15
 """Доля тайлов без объектов, которые оставляем (подбирается: больше — меньше FP)."""

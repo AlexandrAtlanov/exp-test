@@ -57,7 +57,23 @@ def _fake_result(class_ids: list[int]) -> object:
 
 
 def test_baseline_class_names_mapped_and_unknown_dropped() -> None:
-    """Модель бейзлайна: «kurgany» → kurgany_tselye, gorodishcha как есть, «dorogi» — отброс."""
+    """model.pt: «kurgany» → оба класса курганов, gorodishcha как есть, «dorogi» — отброс."""
     names = {0: "gorodishcha", 4: "kurgany", 5: "dorogi"}
     found = yolo_runtime._instances(_fake_result([0, 4, 5]), (4, 4), names)
-    assert [inst.class_name for inst in found] == ["gorodishcha", "kurgany_tselye"]
+    assert [inst.class_name for inst in found] == [
+        "gorodishcha",
+        "kurgany_tselye",
+        "kurgany_povrezhdennye",
+    ]
+
+
+def test_passport_sets_tiling_for_own_model(tmp_path) -> None:
+    """Паспорт .pt.json (наша модель): тайл из паспорта, масштаб (1,); нет паспорта — config."""
+    pt = tmp_path / "lidar_yolo.pt"
+    assert yolo_runtime._passport_tiling(pt) == (None, None)  # model.pt бейзлайна
+    pt.with_suffix(".pt.json").write_text('{"tile_px": 1024, "imgsz": 512}', encoding="utf-8")
+    assert yolo_runtime._passport_tiling(pt) == (1024, (1.0,))
+    pt.with_suffix(".pt.json").write_text('{"tile_px": 2048, "scales": [1, 2]}', encoding="utf-8")
+    assert yolo_runtime._passport_tiling(pt) == (2048, (1.0, 2.0))
+    pt.with_suffix(".pt.json").write_text("не json", encoding="utf-8")
+    assert yolo_runtime._passport_tiling(pt) == (None, None)
