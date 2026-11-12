@@ -74,6 +74,17 @@ def test_hillshades_match_baseline(tmp_path: Path) -> None:
         assert digest == BASELINE_SHA256[tag], f"хиллшейд {tag} отличается от бейзлайна"
 
 
+def test_only_requested_variants_built_and_identical(tmp_path: Path) -> None:
+    """variants строит только нужные отмывки, пиксели те же, что в полном наборе."""
+    las = write_synthetic_las(tmp_path / "synthetic_La.las")
+    paths = lidar_dem.hillshades_for_las(las, "EPSG:32637", tmp_path / "gi", variants=("g", "i"))
+    assert [p.stem.rsplit("_", 1)[-1] for p in paths] == ["g", "i"]
+    for path in paths:
+        with rasterio.open(path) as src:
+            digest = hashlib.sha256(src.read().tobytes()).hexdigest()
+        assert digest == BASELINE_SHA256[path.stem.rsplit("_", 1)[-1]]
+
+
 def test_missing_las_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         lidar_dem.hillshades_for_las(tmp_path / "nope.las", "EPSG:32637", tmp_path / "out")

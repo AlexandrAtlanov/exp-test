@@ -68,7 +68,9 @@ def _load_run(path: Path) -> dict[str, Any]:
         data = json.load(handle)
     results = data["results"]
     if not isinstance(results, dict) or "final_score" not in results or "per_class" not in results:
-        raise ValueError("нет results.final_score / results.per_class — это run.json из evaluate.py?")
+        raise ValueError(
+            "нет results.final_score / results.per_class — это run.json из evaluate.py?"
+        )
     return data
 
 
@@ -159,13 +161,13 @@ def _size_rows(results: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
     for cat in cats:
         max_area = cat.get("max_area")
         label = f"≤ {max_area:g}" if max_area is not None else "> 10000"
-        rows.append([label, str(cat.get("gt", 0)), str(cat.get("tp", 0)), _fmt_opt(cat.get("recall"))])
+        rows.append(
+            [label, str(cat.get("gt", 0)), str(cat.get("tp", 0)), _fmt_opt(cat.get("recall"))]
+        )
     return header, rows
 
 
-def _compare_rows(
-    prev: dict[str, Any], cur: dict[str, Any]
-) -> tuple[list[str], list[list[str]]]:
+def _compare_rows(prev: dict[str, Any], cur: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
     """Таблица «было → стало» по классам: F1, TP, FP, FN."""
     header = ["класс", "F1 было", "F1 стало", "Δ F1", "TP", "FP", "FN"]
     rows: list[list[str]] = []

@@ -12,10 +12,10 @@ import argparse
 import tempfile
 from pathlib import Path
 
-import hillshades
 import numpy as np
 import rasterio
 
+import hillshades
 from koz3.discovery import find_regions
 
 

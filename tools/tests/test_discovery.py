@@ -13,9 +13,10 @@ from pathlib import Path
 import _bootstrap  # noqa: F401  # добавляет submission/ в sys.path
 import numpy
 import rasterio
-from koz3.discovery import _markup_type_of, find_regions
 from rasterio.crs import CRS
 from rasterio.transform import from_origin
+
+from koz3.discovery import _markup_type_of, find_regions
 
 
 def _rel_names(paths: list[Path], region: Path) -> list[str]:
@@ -32,9 +33,7 @@ def _las_with_vlr(wkt: str) -> bytes:
     header[25] = 4
     struct.pack_into("<H", header, 94, 375)
     struct.pack_into("<I", header, 100, 1)
-    vlr = struct.pack(
-        "<H16sHH32s", 0, b"LASF_Projection", 2112, len(wkt_bytes), b"OGC WKT CRS"
-    )
+    vlr = struct.pack("<H16sHH32s", 0, b"LASF_Projection", 2112, len(wkt_bytes), b"OGC WKT CRS")
     return bytes(header) + vlr + wkt_bytes
 
 
@@ -49,9 +48,7 @@ def _las_with_evlr(wkt: str) -> bytes:
     struct.pack_into("<I", header, 100, 0)
     struct.pack_into("<Q", header, 235, 375)
     struct.pack_into("<I", header, 243, 1)
-    evlr = struct.pack(
-        "<H16sHQ32s", 0, b"LASF_Projection", 2112, len(wkt_bytes), b"OGC WKT CRS"
-    )
+    evlr = struct.pack("<H16sHQ32s", 0, b"LASF_Projection", 2112, len(wkt_bytes), b"OGC WKT CRS")
     return bytes(header) + evlr + wkt_bytes
 
 
@@ -68,9 +65,7 @@ def _las_12_with_vlr(wkt: str) -> bytes:
     header[25] = 2
     struct.pack_into("<H", header, 94, 227)
     struct.pack_into("<I", header, 100, 1)
-    vlr = struct.pack(
-        "<H16sHH32s", 0, b"GARBAGEUSERID01", 2112, len(wkt_bytes), b"OGC WKT CRS"
-    )
+    vlr = struct.pack("<H16sHH32s", 0, b"GARBAGEUSERID01", 2112, len(wkt_bytes), b"OGC WKT CRS")
     return bytes(header) + vlr + wkt_bytes
 
 
@@ -117,9 +112,7 @@ class DiscoveryTest(unittest.TestCase):
             (region / folder).mkdir(parents=True)
             for name in names:
                 (region / folder / name).write_bytes(b"")
-        (region / "UTM.json").write_text(
-            json.dumps({"crs": "EPSG:32637"}), encoding="utf-8"
-        )
+        (region / "UTM.json").write_text(json.dumps({"crs": "EPSG:32637"}), encoding="utf-8")
 
         regions = find_regions(self.input_dir)
 
@@ -149,9 +142,7 @@ class DiscoveryTest(unittest.TestCase):
 
     def test_input_without_subdirs_is_single_region(self) -> None:
         (self.input_dir / "cloud.las").write_bytes(b"")
-        (self.input_dir / "UTM.json").write_text(
-            json.dumps({"utm": "37N"}), encoding="utf-8"
-        )
+        (self.input_dir / "UTM.json").write_text(json.dumps({"utm": "37N"}), encoding="utf-8")
 
         regions = find_regions(self.input_dir)
 
@@ -159,9 +150,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(self.input_dir, regions[0].path)
         self.assertEqual(self.input_dir.name, regions[0].name)
         self.assertEqual("EPSG:32637", regions[0].utm_crs)
-        self.assertEqual(
-            ["cloud.las"], _rel_names(regions[0].files["li"], self.input_dir)
-        )
+        self.assertEqual(["cloud.las"], _rel_names(regions[0].files["li"], self.input_dir))
 
     def test_crs_from_utm_json(self) -> None:
         cases = [
@@ -230,9 +219,7 @@ class DiscoveryTest(unittest.TestCase):
     def test_geographic_utm_json_falls_back_to_raster(self) -> None:
         region = self.input_dir / "site"
         (region / "Ae").mkdir(parents=True)
-        (region / "UTM.json").write_text(
-            json.dumps({"crs": "EPSG:4326"}), encoding="utf-8"
-        )
+        (region / "UTM.json").write_text(json.dumps({"crs": "EPSG:4326"}), encoding="utf-8")
         _write_geotiff(region / "Ae" / "aero.tif")
 
         regions = find_regions(self.input_dir)
@@ -256,9 +243,7 @@ class DiscoveryTest(unittest.TestCase):
         (region / ".hidden").mkdir(parents=True)
         (region / ".hidden" / "cloud.las").write_bytes(b"")
         (region / ".DS_Store").write_bytes(b"")
-        (region / "UTM.json").write_text(
-            json.dumps({"crs": "EPSG:32637"}), encoding="utf-8"
-        )
+        (region / "UTM.json").write_text(json.dumps({"crs": "EPSG:32637"}), encoding="utf-8")
 
         regions = find_regions(self.input_dir)
 

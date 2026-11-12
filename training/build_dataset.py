@@ -3,9 +3,14 @@
 Для каждого региона трейна:
 1. хиллшейды (из LAS алгоритмом бейзлайна или готовые Li — флаг --source);
 2. разметка лидара (тип li) переводится в CRS хиллшейда и в пиксели;
-3. растр режется на тайлы settings.TILE_PX с перекрытием; тайл с объектами
+3. для каждого масштаба --scales отмывка сжимается в k раз (yolo_runtime.downscale — как
+   на инференсе) и режется на тайлы --tile-px с перекрытием --overlap; тайл с объектами
    сохраняется всегда, пустой — с вероятностью NEGATIVE_TILE_SHARE;
-4. подписи YOLO-seg: «класс x1 y1 x2 y2 …» (нормировано на размер тайла).
+4. подписи YOLO-seg: «класс x1 y1 x2 y2 …» (нормировано на размер тайла);
+5. train (не val): к тайлу с объектами — копии, повёрнутые на 90/180/270° (--no-rot90 —
+   без них); подписи поворачиваются вместе с картинкой.
+Параметры нарезки пишутся в <out>/dataset_meta.json: train.py переносит их в паспорт
+весов, и детектор на платформе режет отмывку так же, как при обучении.
 Разбиение train/val — по регионам целиком (VAL_REGIONS или хеш имени).
 Изображения готовятся той же функцией, что на инференсе (koz3.yolo_runtime).
 Формат тайлов — только png (settings.IMAGE_FORMAT, В3): jpg сжимает с
@@ -15,6 +20,7 @@
 Запуск:
   python training/build_dataset.py --data /трейн --out /датасет --cache /кэш_хиллшейдов
   [--source las|li] [--workers 8] [--regions 200_Судьбищи_2 ...]
+  [--tile-px 512] [--overlap 0.1] [--scales 1 2] [--no-rot90]
 """
 
 import argparse
@@ -23,6 +29,7 @@ import logging
 import zlib
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -36,9 +43,19 @@ import hillshades
 import settings
 from annotations import find_annotation_files, load_objects
 from koz3.discovery import find_regions
-from koz3.yolo_runtime import tile_positions, to_model_image, valid_pixel_mask
+from koz3.yolo_runtime import downscale, tile_positions, to_model_image, valid_pixel_mask
 
 logger = logging.getLogger("build_dataset")
+
+
+@dataclass(frozen=True)
+class TileOptions:
+    """Параметры нарезки датасета (пишутся в dataset_meta.json → паспорт весов)."""
+
+    tile_px: int = settings.TILE_PX
+    overlap: float = settings.TILE_OVERLAP
+    scales: tuple[float, ...] = settings.TILE_SCALES
+    rot90: bool = settings.ROT90_AUGMENT
 
 
 def split_of(region_name: str) -> str:
@@ -96,50 +113,90 @@ def label_lines(objects_px, tree, tile: Polygon, x0: int, y0: int, size: int) ->
     return lines
 
 
-def tile_raster(raster_path: Path, objects, out_dir: Path, split: str, region: str) -> Counter:
-    """Нарезать один хиллшейд на тайлы с подписями; вернуть счётчики."""
+def rotate_lines(lines: list[str], k: int) -> list[str]:
+    """Подписи YOLO-seg для картинки, повёрнутой np.rot90(·, k) (против часовой стрелки).
+
+    np.rot90 переносит пиксель (строка r, столбец c) картинки ширины W в (W-1-c, r):
+    в нормированных координатах (x, y) → (y, 1 - x), k раз.
+    """
+    rotated = []
+    for line in lines:
+        class_id, *values = line.split()
+        xy = np.asarray(values, dtype=np.float64).reshape(-1, 2)
+        for _ in range(k % 4):
+            xy = np.column_stack([xy[:, 1], 1.0 - xy[:, 0]])
+        rotated.append(f"{class_id} " + " ".join(f"{v:.6f}" for v in xy.ravel()))
+    return rotated
+
+
+def _save_tile(out_dir: Path, split: str, stem: str, tile: np.ndarray, lines: list[str]) -> None:
+    """Картинка png и подпись YOLO-seg одного тайла."""
+    Image.fromarray(tile).save(out_dir / "images" / split / f"{stem}.{settings.IMAGE_FORMAT}")
+    (out_dir / "labels" / split / f"{stem}.txt").write_text(
+        "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+    )
+
+
+def tile_raster(
+    raster_path: Path,
+    objects,
+    out_dir: Path,
+    split: str,
+    region: str,
+    opts: TileOptions | None = None,
+) -> Counter:
+    """Нарезать один хиллшейд на тайлы с подписями (все масштабы); вернуть счётчики."""
+    opts = opts or TileOptions()
     stats: Counter = Counter()
     with rasterio.open(raster_path) as src:
-        image = to_model_image(src.read())
-        transform, crs = src.transform, src.crs.to_string()
-        res_m = abs(transform.a)
-    valid = valid_pixel_mask(image)
-    objects_px = []
-    for class_name, geom in objects.get(crs, []):
-        px = to_pixels(as_area(geom, res_m), transform)
-        if not px.is_empty:
-            objects_px.append((settings.CLASSES.index(class_name), px))
-    tree = shapely.STRtree([g for _, g in objects_px])
+        full = to_model_image(src.read())
+        full_transform, crs = src.transform, src.crs.to_string()
+        res_m = abs(full_transform.a)
     rng = np.random.default_rng(zlib.crc32(raster_path.name.encode()) + settings.SEED)
-    height, width = image.shape[:2]
-    size = settings.TILE_PX
-    for y0 in tile_positions(height, size, settings.TILE_OVERLAP):
-        for x0 in tile_positions(width, size, settings.TILE_OVERLAP):
-            window_valid = valid[y0 : y0 + size, x0 : x0 + size]
-            if window_valid.mean() < settings.MIN_VALID_SHARE:
-                continue
-            lines = label_lines(objects_px, tree, box(x0, y0, x0 + size, y0 + size), x0, y0, size)
-            if not lines and rng.random() > settings.NEGATIVE_TILE_SHARE:
-                continue
-            tile = np.zeros((size, size, 3), dtype=np.uint8)
-            crop = image[y0 : y0 + size, x0 : x0 + size]
-            tile[: crop.shape[0], : crop.shape[1]] = crop  # край растра дополняем нулями
-            stem = f"{region}__{raster_path.stem}__y{y0}_x{x0}"
-            Image.fromarray(tile).save(
-                out_dir / "images" / split / f"{stem}.{settings.IMAGE_FORMAT}"
-            )
-            (out_dir / "labels" / split / f"{stem}.txt").write_text(
-                "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
-            )
-            stats["tiles"] += 1
-            stats["tiles_empty"] += not lines
-            for line in lines:
-                stats[settings.CLASSES[int(line.split()[0])]] += 1
+    for factor in opts.scales:
+        image = downscale(full, float(factor))
+        height, width = image.shape[:2]
+        transform = full_transform * full_transform.scale(
+            full.shape[1] / width, full.shape[0] / height
+        )
+        valid = valid_pixel_mask(image)
+        objects_px = []
+        for class_name, geom in objects.get(crs, []):
+            px = to_pixels(as_area(geom, res_m), transform)
+            if not px.is_empty:
+                objects_px.append((settings.CLASSES.index(class_name), px))
+        tree = shapely.STRtree([g for _, g in objects_px])
+        size = opts.tile_px
+        for y0 in tile_positions(height, size, opts.overlap):
+            for x0 in tile_positions(width, size, opts.overlap):
+                if valid[y0 : y0 + size, x0 : x0 + size].mean() < settings.MIN_VALID_SHARE:
+                    continue
+                tile_box = box(x0, y0, x0 + size, y0 + size)
+                lines = label_lines(objects_px, tree, tile_box, x0, y0, size)
+                if not lines and rng.random() > settings.NEGATIVE_TILE_SHARE:
+                    continue
+                tile = np.zeros((size, size, 3), dtype=np.uint8)
+                crop = image[y0 : y0 + size, x0 : x0 + size]
+                tile[: crop.shape[0], : crop.shape[1]] = crop  # край растра дополняем нулями
+                stem = f"{region}__{raster_path.stem}__s{factor:g}__y{y0}_x{x0}"
+                _save_tile(out_dir, split, stem, tile, lines)
+                stats["tiles"] += 1
+                stats[f"tiles_s{factor:g}"] += 1
+                stats["tiles_empty"] += not lines
+                for line in lines:
+                    stats[settings.CLASSES[int(line.split()[0])]] += 1
+                if opts.rot90 and split == "train" and lines:
+                    for k in (1, 2, 3):
+                        rotated = np.ascontiguousarray(np.rot90(tile, k))
+                        _save_tile(
+                            out_dir, split, f"{stem}__r{k}", rotated, rotate_lines(lines, k)
+                        )
+                        stats["tiles_rot90"] += 1
     return stats
 
 
 def process_region(
-    region, out_dir: Path, cache_dir: Path, source: str
+    region, out_dir: Path, cache_dir: Path, source: str, opts: TileOptions | None = None
 ) -> tuple[str, str, Counter]:
     """Все хиллшейды региона → тайлы; возвращает (регион, split, счётчики)."""
     split = split_of(region.name)
@@ -157,7 +214,7 @@ def process_region(
             crs = src.crs.to_string()
         if crs not in objects:
             objects[crs] = [obj for ann in ann_files for obj in load_objects(ann, crs)]
-        stats += tile_raster(raster_path, objects, out_dir, split, region.name)
+        stats += tile_raster(raster_path, objects, out_dir, split, region.name, opts)
     stats["annotation_files"] = len(ann_files)
     stats["rasters"] = len(rasters)
     return region.name, split, stats
@@ -173,7 +230,15 @@ def write_yaml(out_dir: Path) -> Path:
     return path
 
 
-def main() -> None:
+def write_meta(out_dir: Path, opts: TileOptions) -> Path:
+    """dataset_meta.json: параметры нарезки — train.py переносит их в паспорт весов."""
+    path = out_dir / "dataset_meta.json"
+    meta = {**asdict(opts), "scales": list(opts.scales), "res_m": 0.1, "classes": settings.CLASSES}
+    path.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def main(argv: list[str] | None = None) -> None:
     """Собрать датасет и напечатать сводку по классам в train/val."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", required=True, type=Path, help="папка трейна")
@@ -184,7 +249,25 @@ def main() -> None:
     parser.add_argument("--source", choices=("las", "li"), default="las")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--regions", nargs="*", help="только эти регионы (для пробы)")
-    args = parser.parse_args()
+    parser.add_argument("--tile-px", type=int, default=settings.TILE_PX, help="размер тайла")
+    parser.add_argument("--overlap", type=float, default=settings.TILE_OVERLAP)
+    parser.add_argument(
+        "--scales",
+        type=float,
+        nargs="+",
+        default=list(settings.TILE_SCALES),
+        help="масштабы нарезки: 1 — 0.1 м/пикс, 2 — 0.2 м/пикс …",
+    )
+    parser.add_argument(
+        "--no-rot90", action="store_true", help="без повёрнутых копий тайлов с объектами"
+    )
+    args = parser.parse_args(argv)
+    opts = TileOptions(
+        tile_px=args.tile_px,
+        overlap=args.overlap,
+        scales=tuple(args.scales),
+        rot90=not args.no_rot90 and settings.ROT90_AUGMENT,
+    )
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
@@ -200,7 +283,8 @@ def main() -> None:
     per_region = {}
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = [
-            pool.submit(process_region, r, args.out, args.cache, args.source) for r in regions
+            pool.submit(process_region, r, args.out, args.cache, args.source, opts)
+            for r in regions
         ]
         for future in futures:
             name, split, stats = future.result()
@@ -208,13 +292,15 @@ def main() -> None:
             per_region[name] = {"split": split, **stats}
             logger.info("%s [%s]: %s", name, split, dict(stats))
     yaml_path = write_yaml(args.out)
+    write_meta(args.out, opts)
     (args.out / "stats.json").write_text(
         json.dumps({"summary": summary, "regions": per_region}, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
     for split, stats in summary.items():
         print(
-            f"{split}: тайлов {stats['tiles']} (пустых {stats['tiles_empty']}); объекты: "
+            f"{split}: тайлов {stats['tiles']} (пустых {stats['tiles_empty']}, "
+            f"повёрнутых копий {stats['tiles_rot90']}); объекты: "
             + ", ".join(f"{c}={stats[c]}" for c in settings.CLASSES)
         )
     missing = [c for c in settings.CLASSES if summary["val"][c] == 0]

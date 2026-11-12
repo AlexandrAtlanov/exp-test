@@ -8,6 +8,7 @@ import _bootstrap  # noqa: F401  # добавляет submission/ в sys.path
 import numpy as np
 import pytest
 import rasterio
+from PIL import Image
 from rasterio.transform import from_origin
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "training"))
@@ -95,16 +96,18 @@ def test_tile_raster_writes_yolo_labels(tmp_path: Path, monkeypatch) -> None:
     )
     ann = annotations.AnnotationFile(ann_path, "li", annotations._file_crs(ann_path))
     objects = {CRS: annotations.load_objects(ann, CRS)}
-    stats = build_dataset.tile_raster(raster, objects, tmp_path, "train", "r")
+    opts = build_dataset.TileOptions(tile_px=256, overlap=0.25, scales=(1,), rot90=False)
+    stats = build_dataset.tile_raster(raster, objects, tmp_path, "train", "r", opts)
     assert stats["kurgany_povrezhdennye"] >= 1
-    label = (tmp_path / "labels" / "train" / "r__hs_g__y0_x0.txt").read_text(encoding="utf-8")
+    label_path = tmp_path / "labels" / "train" / "r__hs_g__s1__y0_x0.txt"
+    label = label_path.read_text(encoding="utf-8")
     class_id, *coords = label.split()
     assert int(class_id) == settings.CLASSES.index("kurgany_povrezhdennye")
     xs = [float(v) for v in coords[0::2]]
     ys = [float(v) for v in coords[1::2]]
     assert min(xs) == pytest.approx(100 / 256, abs=0.01)
     assert max(ys) == pytest.approx(150 / 256, abs=0.01)
-    image = tmp_path / "images" / "train" / f"r__hs_g__y0_x0.{settings.IMAGE_FORMAT}"
+    image = tmp_path / "images" / "train" / f"r__hs_g__s1__y0_x0.{settings.IMAGE_FORMAT}"
     assert image.is_file()
 
 
@@ -122,3 +125,68 @@ def test_geophysics_classes_opt_in(tmp_path: Path) -> None:
     assert annotations.load_objects(ann, CRS) == []
     loaded = annotations.load_objects(ann, CRS, settings.ALL_CLASSES)
     assert [name for name, _ in loaded] == ["object_poly"]
+
+
+def _dataset_dirs(root: Path) -> None:
+    for split in ("train", "val"):
+        (root / "images" / split).mkdir(parents=True)
+        (root / "labels" / split).mkdir(parents=True)
+
+
+def _polygon_mask(line: str, size: int) -> np.ndarray:
+    """Растеризовать подпись YOLO-seg (одна строка) в маску size × size."""
+    from PIL import ImageDraw
+
+    values = [float(v) for v in line.split()[1:]]
+    points = [(values[i] * size, values[i + 1] * size) for i in range(0, len(values), 2)]
+    canvas = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(canvas).polygon(points, fill=1)
+    return np.asarray(canvas, dtype=bool)
+
+
+def test_rotated_labels_match_rotated_image() -> None:
+    """Подпись, повёрнутая rotate_lines, совпадает с np.rot90 исходной маски."""
+    size = 64
+    line = "1 0.100000 0.200000 0.500000 0.200000 0.500000 0.400000 0.100000 0.400000"
+    mask = _polygon_mask(line, size)
+    for k in (1, 2, 3):
+        [rotated] = build_dataset.rotate_lines([line], k)
+        assert rotated.split()[0] == "1"
+        expected = np.rot90(mask, k)
+        got = _polygon_mask(rotated, size)
+        assert (expected ^ got).sum() <= 2 * size  # расхождение — только пиксели границы
+
+
+def test_scales_rotations_and_meta(tmp_path: Path, monkeypatch) -> None:
+    """Масштабы 1 и 2, повороты только в train, dataset_meta.json для паспорта весов."""
+    monkeypatch.setattr(settings, "NEGATIVE_TILE_SHARE", 0.0)
+    _dataset_dirs(tmp_path)
+    raster = _raster(tmp_path / "hs_c.tif", 512)
+    ann_path = _annotation(
+        tmp_path / "r_Li_Курганы.geojson", "Курганы_целые", (ORIGIN_X + 10.0, ORIGIN_Y - 10.0, 8.0)
+    )
+    ann = annotations.AnnotationFile(ann_path, "li", annotations._file_crs(ann_path))
+    objects = {CRS: annotations.load_objects(ann, CRS)}
+    opts = build_dataset.TileOptions(tile_px=256, overlap=0.1, scales=(1, 2), rot90=True)
+
+    stats = build_dataset.tile_raster(raster, objects, tmp_path, "train", "r", opts)
+    assert stats["tiles_s1"] >= 1 and stats["tiles_s2"] == 1  # 512 → 256: один тайл
+    assert stats["tiles_rot90"] == 3 * (stats["tiles"] - stats["tiles_empty"])
+    names = {p.name for p in (tmp_path / "images" / "train").iterdir()}
+    assert "r__hs_g__s2__y0_x0.png" not in names  # имя растра — hs_c
+    assert {"r__hs_c__s2__y0_x0.png", "r__hs_c__s2__y0_x0__r1.png"} <= names
+    # масштаб 2: квадрат 8 м = 40 пикс при 0.2 м/пикс, левый край на 50 пикс
+    label = (tmp_path / "labels" / "train" / "r__hs_c__s2__y0_x0.txt").read_text()
+    xs = [float(v) for v in label.split()[1::2]]
+    assert min(xs) == pytest.approx(50 / 256, abs=0.01)
+    assert max(xs) == pytest.approx(90 / 256, abs=0.01)
+
+    val_stats = build_dataset.tile_raster(raster, objects, tmp_path, "val", "r", opts)
+    assert val_stats["tiles_rot90"] == 0
+
+    meta = json.loads(build_dataset.write_meta(tmp_path, opts).read_text(encoding="utf-8"))
+    assert meta["tile_px"] == 256 and meta["scales"] == [1, 2]
+    import train
+
+    tiling = train.dataset_tiling(tmp_path / "dataset.yaml")
+    assert tiling == {"tile_px": 256, "scales": [1.0, 2.0], "rot90": True}

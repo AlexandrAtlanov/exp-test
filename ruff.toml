@@ -8,4 +8,9 @@ select = ["E", "F", "W", "I"]
 
 [lint.isort]
 # свои модули: пакет решения и инструменты/обучение (их пути добавляет _bootstrap)
-known-first-party = ["koz3", "solution", "settings", "annotations", "make_gt", "validate_output"]
+known-first-party = [
+    "koz3", "solution",
+    "settings", "annotations", "hillshades", "build_dataset", "matching", "train",
+    "export_engine", "check_hillshades", "inspect_annotations",
+    "make_gt", "make_holdout", "build_zip", "evaluate", "validate_output", "tune_thresholds",
+]

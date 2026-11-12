@@ -50,8 +50,7 @@ def test_make_gt_full_run(tmp_path: Path) -> None:
         [
             _feature(
                 Polygon(
-                    [(500000, 5000000), (500030, 5000000), (500030, 5000030),
-                     (500000, 5000030)]
+                    [(500000, 5000000), (500030, 5000000), (500030, 5000030), (500000, 5000030)]
                 ),
                 class_name="курганы_целые",
             ),
@@ -66,8 +65,12 @@ def test_make_gt_full_run(tmp_path: Path) -> None:
             _feature(Point(2337576.0, 5639436.0), class_name="FindsPoints"),
             _feature(
                 Polygon(
-                    [(2337576.0, 5639436.0), (2337606.0, 5639436.0),
-                     (2337606.0, 5639466.0), (2337576.0, 5639466.0)]
+                    [
+                        (2337576.0, 5639436.0),
+                        (2337606.0, 5639436.0),
+                        (2337606.0, 5639466.0),
+                        (2337576.0, 5639466.0),
+                    ]
                 ),
                 class_name="StructrPoly",
             ),
@@ -79,8 +82,7 @@ def test_make_gt_full_run(tmp_path: Path) -> None:
         [
             _feature(
                 Polygon(
-                    [(500000, 5000000), (500400, 5000000), (500400, 5000400),
-                     (500000, 5000400)]
+                    [(500000, 5000000), (500400, 5000000), (500400, 5000400), (500000, 5000400)]
                 ),
                 class_name="городище",
             )
@@ -144,9 +146,7 @@ def test_make_gt_missing_region_fails(tmp_path: Path) -> None:
     train = tmp_path / "train"
     train.mkdir()
     out = tmp_path / "gt.geojson"
-    code = make_gt.main(
-        ["--data", str(train), "--regions", "нет_такого", "--out", str(out)]
-    )
+    code = make_gt.main(["--data", str(train), "--regions", "нет_такого", "--out", str(out)])
     assert code == 1
     assert not out.exists()
 

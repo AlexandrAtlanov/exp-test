@@ -47,7 +47,7 @@ from types import ModuleType
 import numpy as np
 from shapely.geometry import mapping
 
-from koz3 import config, discovery, geometry, output, postprocess
+from koz3 import config, discovery, geometry, output, postprocess, tuning
 from koz3.datatypes import Detection, Region
 from koz3.timing import Budget
 
@@ -114,11 +114,13 @@ def _load_detectors() -> list[ModuleType]:
         full_name = f"{DETECTORS_PACKAGE}.{name}"
         try:
             module = importlib.import_module(full_name)
-        except ImportError as exc:
-            raise ValueError(f"детектор {full_name} не импортируется: {exc}") from exc
+        except Exception:  # noqa: BLE001  # один сломанный детектор не выключает остальные
+            logger.exception("детектор %s не импортируется — пропущен", full_name)
+            continue
         missing = [attr for attr in _DETECTOR_API if not hasattr(module, attr)]
         if missing:
-            raise ValueError(f"детектор {full_name} нарушает контракт, нет: {missing}")
+            logger.error("детектор %s нарушает контракт, нет: %s — пропущен", full_name, missing)
+            continue
         modules.append(module)
     modules.sort(key=lambda module: (int(module.PRIORITY), module.__name__))
     for module in modules:
@@ -285,6 +287,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     out_path = output.resolve_output_path(output_arg)
     _fix_seed()
+    try:
+        tuning.apply_tuned()  # weights/postprocess.json от tools/tune_thresholds.py --apply
+    except Exception:  # noqa: BLE001  # подобранные параметры не обязательны
+        logger.exception("подобранные параметры не применены — значения config.py")
     budget = Budget(config.TIME_LIMIT_S)
     try:
         regions = discovery.find_regions(Path(input_arg))
