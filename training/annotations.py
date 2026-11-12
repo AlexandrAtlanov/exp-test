@@ -1,8 +1,9 @@
 """Чтение разметки трейна: файлы, тип данных, класс, геометрии в нужной CRS.
 
-Формат файлов разметки организаторов нам известен не полностью, поэтому
-класс берётся из свойства фичи (settings.CLASS_PROPERTY_KEYS), а если его
-нет — из имени файла. Тип данных — по меткам в имени файла.
+Формат файлов разметки организаторов нам известен не полностью, поэтому класс
+объекта (feature_class): явное поле класса (settings.CLASS_FIELD_KEYS) → имя файла →
+свободный текст (settings.NAME_FIELD_KEYS: name, layer, type). Тип данных — по меткам
+в имени файла.
 """
 
 import json
@@ -46,6 +47,23 @@ def canonical_class(raw: str | None) -> str | None:
     for synonym in sorted(settings.CLASS_SYNONYMS, key=len, reverse=True):
         if synonym in key:
             return settings.CLASS_SYNONYMS[synonym]
+    return None
+
+
+def feature_class(props: dict[str, object], file_class: str | None) -> str | None:
+    """Класс объекта: явное поле класса → класс из имени файла → name / layer / type.
+
+    Свободный текст (имя объекта «Курган №5», слой) распознаётся по подстроке и не
+    должен перекрывать класс файла «Курганы_поврежденные».
+    """
+    for key in settings.CLASS_FIELD_KEYS:
+        if props.get(key) is not None and canonical_class(str(props[key])):
+            return canonical_class(str(props[key]))
+    if file_class is not None:
+        return file_class
+    for key in settings.NAME_FIELD_KEYS:
+        if props.get(key) is not None and canonical_class(str(props[key])):
+            return canonical_class(str(props[key]))
     return None
 
 
@@ -107,11 +125,7 @@ def load_objects(
         props = feature.get("properties") or {}
         if stem_ignored or _props_ignored(props):
             continue
-        class_name = file_class
-        for key in settings.CLASS_PROPERTY_KEYS:
-            if props.get(key) is not None and canonical_class(props[key]):
-                class_name = canonical_class(props[key])
-                break
+        class_name = feature_class(props, file_class)
         if class_name not in classes:
             continue
         geom = shape(geom_dict)

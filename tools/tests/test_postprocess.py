@@ -24,6 +24,26 @@ _REGION_NAME = "test_region"
 """Имя региона для всех тестовых детекций."""
 
 
+def _run_no_copy(detections: list[Detection]) -> list[Detection]:
+    """postprocess.run без копий курганов (KURGANY_CROSS_COPY = None) — старые проверки."""
+    saved = config.KURGANY_CROSS_COPY
+    config.KURGANY_CROSS_COPY = None
+    try:
+        return postprocess.run(detections)
+    finally:
+        config.KURGANY_CROSS_COPY = saved
+
+
+def _run_with_copy(detections: list[Detection], factor: float = 0.5) -> list[Detection]:
+    """postprocess.run с копиями курганов во второй класс (confidence × factor)."""
+    saved = config.KURGANY_CROSS_COPY
+    config.KURGANY_CROSS_COPY = factor
+    try:
+        return postprocess.run(detections)
+    finally:
+        config.KURGANY_CROSS_COPY = saved
+
+
 def _square(x_m: float, y_m: float, size_m: float) -> Polygon:
     """Квадрат со стороной size_m; (x_m, y_m) — левый нижний угол (UTM, м)."""
     return Polygon(
@@ -58,7 +78,7 @@ def test_duplicate_same_class_and_type_suppressed() -> None:
         _det(_square(0.0, 0.0, 10.0), conf=0.9),
         _det(_square(0.5, 0.0, 10.0), conf=0.8),
     ]
-    result = postprocess.run(dets)
+    result = _run_no_copy(dets)
     assert len(result) == 1
     assert result[0].confidence == 0.9
     assert result[0].class_name == "kurgany_tselye"
@@ -71,7 +91,7 @@ def test_duplicate_different_markup_type_kept() -> None:
         _det(_square(0.0, 0.0, 10.0), conf=0.9, markup_type="li"),
         _det(_square(0.5, 0.0, 10.0), conf=0.8, markup_type="ae"),
     ]
-    result = postprocess.run(dets)
+    result = _run_no_copy(dets)
     assert len(result) == 2
     assert {det.markup_type for det in result} == {"li", "ae"}
 
@@ -85,7 +105,7 @@ def test_small_inside_large_suppressed() -> None:
         _det(_square(0.0, 0.0, 10.0), conf=0.9),
         _det(_square(1.0, 1.0, 2.0), conf=0.6),
     ]
-    result = postprocess.run(dets)
+    result = _run_no_copy(dets)
     assert len(result) == 1
     assert abs(result[0].geom.area - 100.0) < 1e-9
 
@@ -96,14 +116,14 @@ def test_disjoint_kept() -> None:
         _det(_square(0.0, 0.0, 10.0), conf=0.9),
         _det(_square(100.0, 0.0, 10.0), conf=0.5),
     ]
-    result = postprocess.run(dets)
+    result = _run_no_copy(dets)
     assert len(result) == 2
 
 
 def test_unknown_class_dropped() -> None:
     """Приёмка 5: класс вне CLASSES → отброшен, несмотря на confidence."""
     dets = [_det(_square(0.0, 0.0, 10.0), class_name="unknown_klass")]
-    assert postprocess.run(dets) == []
+    assert _run_no_copy(dets) == []
 
 
 def test_default_threshold_boundary() -> None:
@@ -112,7 +132,7 @@ def test_default_threshold_boundary() -> None:
         _det(_square(0.0, 0.0, 10.0), conf=0.24),
         _det(_square(100.0, 0.0, 10.0), conf=0.25),
     ]
-    result = postprocess.run(dets)
+    result = _run_no_copy(dets)
     assert [det.confidence for det in result] == [0.25]
 
 
@@ -126,7 +146,7 @@ def test_pair_threshold_overrides_default() -> None:
             _det(_square(0.0, 0.0, 10.0), conf=0.4),
             _det(_square(0.0, 0.0, 10.0), conf=0.6),
         ]
-        result = postprocess.run(dets)
+        result = _run_no_copy(dets)
         assert [det.confidence for det in result] == [0.6]
     finally:
         if saved is None:
@@ -141,7 +161,7 @@ def test_min_area_filter() -> None:
         _det(_square(0.0, 0.0, 1.0), conf=0.9),
         _det(_square(100.0, 0.0, 2.0), conf=0.9),
     ]
-    result = postprocess.run(dets)
+    result = _run_no_copy(dets)
     assert len(result) == 1
     assert abs(result[0].geom.area - 4.0) < 1e-9
 
@@ -161,7 +181,7 @@ def test_simplify_removes_collinear_vertices() -> None:
             (0.0, 0.0),
         ]
     )
-    result = postprocess.run([_det(geom, conf=0.9)])
+    result = _run_no_copy([_det(geom, conf=0.9)])
     assert len(result) == 1
     assert len(result[0].geom.exterior.coords) == 5
 
@@ -183,7 +203,7 @@ def test_input_not_mutated() -> None:
     det_b = _det(_square(0.5, 0.0, 10.0), conf=0.8)
     wkt_a, wkt_b = det_a.geom.wkt, det_b.geom.wkt
     original = [det_a, det_b]
-    result = postprocess.run(original)
+    result = _run_no_copy(original)
     assert len(original) == 2
     assert det_a.geom.wkt == wkt_a and det_b.geom.wkt == wkt_b
     assert len(result) == 1
@@ -198,7 +218,7 @@ def test_limit_features() -> None:
         xs_m = (0.0, 100.0, 200.0, 300.0, 400.0)
         confs = (0.30, 0.35, 0.40, 0.45, 0.50)
         dets = [_det(_square(x_m, 0.0, 10.0), conf=conf) for x_m, conf in zip(xs_m, confs)]
-        result = postprocess.run(dets)
+        result = _run_no_copy(dets)
         assert len(result) == 3
         assert sorted(det.confidence for det in result) == [0.40, 0.45, 0.50]
     finally:
@@ -209,7 +229,7 @@ def test_equal_confidence_keeps_first() -> None:
     """Равные confidence: остаётся первый по исходному порядку (детерминизм)."""
     first = _det(_square(0.0, 0.0, 10.0), conf=0.8)
     second = _det(_square(0.5, 0.0, 10.0), conf=0.8)
-    result = postprocess.run([first, second])
+    result = _run_no_copy([first, second])
     assert len(result) == 1
     assert result[0].geom.equals(first.geom)
     assert not result[0].geom.equals(second.geom)
@@ -220,7 +240,7 @@ def test_whole_object_beats_tile_edge_fragment() -> None:
     whole = _det(_square(0.0, 0.0, 10.0), conf=0.80)
     fragment = _det(_square(0.0, 0.0, 6.0), conf=0.85)
     fragment.extra["edge_cut"] = True
-    result = postprocess.run([fragment, whole])
+    result = _run_no_copy([fragment, whole])
     assert len(result) == 1
     assert result[0].geom.equals(whole.geom)
 
@@ -230,7 +250,7 @@ def test_fragment_kept_when_no_whole_copy() -> None:
     fragment = _det(_square(0.0, 0.0, 6.0), conf=0.85)
     fragment.extra["edge_cut"] = True
     other = _det(_square(50.0, 0.0, 6.0), conf=0.9)
-    assert len(postprocess.run([fragment, other])) == 2
+    assert len(_run_no_copy([fragment, other])) == 2
 
 
 def test_config_dicts_cover_all_classes() -> None:
@@ -256,11 +276,54 @@ def test_speed_20k_under_10s() -> None:
             dets.append(_det(geom, conf=float(rng.uniform(0.3, 1.0))))
     assert len(dets) == 20000
     start_s = time.perf_counter()
-    result = postprocess.run(dets)
+    result = _run_no_copy(dets)
     elapsed_s = time.perf_counter() - start_s
     assert 0 < len(result) <= 20000
     assert elapsed_s < 10.0
     print(f"20k: {elapsed_s:.2f} с, осталось {len(result)} детекций")
+
+
+def test_cross_copy_adds_other_kurgan_class() -> None:
+    """Курган целый → ещё копия в повреждённые с confidence × 0.5, та же геометрия."""
+    geom = _square(0.0, 0.0, 10.0)
+    out = _run_with_copy([_det(geom, "kurgany_tselye", conf=0.8)])
+    by_class = {det.class_name: det for det in out}
+    assert set(by_class) == {"kurgany_tselye", "kurgany_povrezhdennye"}
+    copy = by_class["kurgany_povrezhdennye"]
+    assert abs(copy.confidence - 0.4) < 1e-9
+    assert copy.extra.get("cross_copy") is True
+    assert copy.geom.equals(by_class["kurgany_tselye"].geom)
+    assert copy.markup_type == "li"
+
+
+def test_cross_copy_skipped_when_target_has_duplicate() -> None:
+    """В целевом классе уже есть дубль (как model.pt в оба класса) → копий нет."""
+    dets = [
+        _det(_square(0.0, 0.0, 10.0), "kurgany_tselye", conf=0.8),
+        _det(_square(0.5, 0.0, 10.0), "kurgany_povrezhdennye", conf=0.6),
+    ]
+    out = _run_with_copy(dets)
+    assert len(out) == 2
+    assert not any(det.extra.get("cross_copy") for det in out)
+
+
+def test_cross_copy_only_for_kurgany_and_bypasses_threshold() -> None:
+    """Другие классы не копируются; копия ниже порога не отбрасывается."""
+    dets = [
+        _det(_square(0.0, 0.0, 30.0), "gorodishcha", conf=0.9),
+        _det(_square(100.0, 0.0, 10.0), "kurgany_povrezhdennye", conf=0.3),
+    ]
+    out = _run_with_copy(dets)
+    classes = sorted(det.class_name for det in out)
+    assert classes == ["gorodishcha", "kurgany_povrezhdennye", "kurgany_tselye"]
+    copy = next(det for det in out if det.class_name == "kurgany_tselye")
+    assert copy.confidence < config.DEFAULT_CONF_THRESHOLD
+
+
+def test_cross_copy_disabled_by_none() -> None:
+    """KURGANY_CROSS_COPY = None — выход как раньше, без копий."""
+    out = _run_no_copy([_det(_square(0.0, 0.0, 10.0), "kurgany_tselye", conf=0.8)])
+    assert [det.class_name for det in out] == ["kurgany_tselye"]
 
 
 def main() -> int:

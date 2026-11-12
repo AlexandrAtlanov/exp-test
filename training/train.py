@@ -8,9 +8,25 @@
   Включение (--flips) — отдельный эксперимент со сравнением на val.
 Веса по окончании копируются в --export-dir под именем из koz3.config.YOLO.
 
+Скорость:
+- тайлы датасета 512 px (build_dataset.py, с 09.11) = config.YOLO["imgsz"] (512): модель
+  видит отмывку без сжатия; тайл и масштабы датасета (dataset_meta.json) пишутся в паспорт
+  весов, и детектор на платформе режет отмывку так же;
+- --cache ram (по умолчанию): картинки после первой эпохи берутся из памяти, а не
+  распаковываются из PNG; если памяти мало, ultralytics сам предупредит и не
+  будет кэшировать — тогда --cache disk;
+- детерминизм обучения выключен (быстрее на GPU); seed фиксирован. Регламент
+  требует детерминизма инференса, а не обучения;
+- --model <путь к model.pt бейзлайна> — старт с весов, уже обученных на
+  отмывках: сходится за меньшее число эпох.
+
 Запуск:
   python training/train.py --data /датасет/dataset.yaml --model yolo11s-seg.pt \
-      --epochs 100 --batch 8 --name lidar_v1 [--flips]
+      --epochs 100 --batch 16 --name lidar_v1 [--flips] [--cache ram|disk|none]
+
+Перед стартом проверяется GPU (gpu_problem): если torch её не видит или не
+поддерживает архитектуру карты (RTX 50xx — нужен torch ≥ 2.7 с CUDA 12.8), обучение не
+начинается — иначе оно молча идёт на CPU в десятки раз медленнее.
 """
 
 import argparse
@@ -32,6 +48,25 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def gpu_problem() -> str | None:
+    """Почему обучать на GPU нельзя, или None. RTX 50xx (sm_120) требует torch с CUDA 12.8."""
+    import torch
+
+    if not torch.cuda.is_available():
+        if torch.version.cuda is None:
+            return "установлена CPU-сборка torch"
+        return "torch собран с CUDA, но видеокарта не видна (драйвер, docker без --gpus all)"
+    major, minor = torch.cuda.get_device_capability(0)
+    arch = f"sm_{major}{minor}"
+    supported = torch.cuda.get_arch_list()
+    if arch not in supported and f"compute_{major}{minor}" not in supported:
+        return (
+            f"torch {torch.__version__} (CUDA {torch.version.cuda}) не поддерживает {arch}; "
+            "для RTX 50xx нужен torch >= 2.7 с CUDA 12.8 (cu128)"
+        )
+    return None
+
+
 def main() -> None:
     """Обучить модель и сохранить лучшие веса с паспортом."""
     from ultralytics import YOLO
@@ -43,19 +78,37 @@ def main() -> None:
         "--model", default="yolo11s-seg.pt", help="стартовые веса (s — быстрее, m — точнее)"
     )
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--batch", type=int, default=16, help="при imgsz 512 на 16 ГБ — 16–32")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--device", default="0")
     parser.add_argument("--name", default="lidar_v1")
     parser.add_argument("--project", type=Path, default=Path("runs"))
     parser.add_argument("--export-dir", type=Path, default=Path("weights_out"))
     parser.add_argument("--flips", action="store_true", help="включить отражения (эксперимент)")
+    parser.add_argument(
+        "--cache",
+        choices=("ram", "disk", "none"),
+        default="ram",
+        help="кэш картинок: ram — быстрее всего, disk — если не хватает памяти",
+    )
     args = parser.parse_args()
+
+    if args.device != "cpu":
+        problem = gpu_problem()
+        if problem is not None:
+            raise SystemExit(
+                f"GPU недоступна для обучения: {problem}. "
+                "Обучать на CPU — только явно: --device cpu"
+            )
+        import torch
+
+        print(f"GPU: {torch.cuda.get_device_name(0)}; torch {torch.__version__}")
 
     model = YOLO(args.model)
     model.train(
         data=str(args.data),
-        imgsz=settings.TILE_PX,
+        imgsz=int(runtime_config.YOLO["imgsz"]),
+        cache=False if args.cache == "none" else args.cache,
         epochs=args.epochs,
         batch=args.batch,
         workers=args.workers,
@@ -63,7 +116,7 @@ def main() -> None:
         project=str(args.project),
         name=args.name,
         seed=settings.SEED,
-        deterministic=True,
+        deterministic=False,  # быстрее; детерминизм нужен инференсу, не обучению
         patience=25,
         cos_lr=True,
         close_mosaic=10,
@@ -87,6 +140,7 @@ def main() -> None:
             f"классы модели {names} не совпадают с config.SURFACE_CLASSES {expected}"
         )
 
+    tiling = dataset_tiling(args.data)
     args.export_dir.mkdir(parents=True, exist_ok=True)
     target = args.export_dir / str(runtime_config.YOLO["weights_pt"])
     shutil.copy2(best, target)
@@ -96,6 +150,8 @@ def main() -> None:
         "ultralytics": ultralytics_version,
         "start_weights": args.model,
         "epochs": args.epochs,
+        "imgsz": int(runtime_config.YOLO["imgsz"]),
+        **tiling,
         "run": str(best.parent.parent),
         "classes": settings.CLASSES,
         "flips": args.flips,
@@ -104,6 +160,27 @@ def main() -> None:
         json.dumps(passport, ensure_ascii=False, indent=1), encoding="utf-8"
     )
     print(json.dumps(passport, ensure_ascii=False, indent=1))
+
+
+def dataset_tiling(data_yaml: Path) -> dict[str, object]:
+    """Тайл и масштабы датасета для паспорта весов (детектор режет отмывку так же).
+
+    Берутся из dataset_meta.json рядом с dataset.yaml (build_dataset.py с 09.11); у старых
+    датасетов файла нет — тайл settings.TILE_PX до 09.11 был 1024, масштаб один.
+    """
+    meta_path = Path(data_yaml).parent / "dataset_meta.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        tiling = {
+            "tile_px": int(meta["tile_px"]),
+            "scales": [float(k) for k in meta["scales"]],
+            "rot90": bool(meta.get("rot90", False)),
+        }
+        if meta.get("hillshades"):
+            tiling["hillshades"] = [str(h) for h in meta["hillshades"]]
+        return tiling
+    print(f"ВНИМАНИЕ: нет {meta_path} — в паспорт записан тайл 1024 и один масштаб")
+    return {"tile_px": 1024, "scales": [1.0], "rot90": False}
 
 
 if __name__ == "__main__":

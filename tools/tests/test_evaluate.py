@@ -12,8 +12,9 @@ import sys
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
-import evaluate
 import pytest
+
+import evaluate
 
 _FINAL_RE = re.compile(r"final_score:\s*([0-9.]+)")
 

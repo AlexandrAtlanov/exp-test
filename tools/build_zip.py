@@ -82,6 +82,9 @@ def weight_files(weights_dir: Path, config) -> tuple[dict[str, Path], list[str]]
         pt_name = str(config.YOLO["weights_pt"])
         if f"weights/{pt_name}" not in files:
             errors.append(f"нет {pt_name} в {weights_dir} (нужен детектору lidar)")
+        for extra in tuple(config.YOLO.get("extra_weights_pt", ())):
+            if f"weights/{extra}" not in files:
+                errors.append(f"нет {extra} в {weights_dir} (YOLO extra_weights_pt — ансамбль)")
     engine_name = str(config.YOLO["weights_engine"])
     if f"weights/{engine_name}" in files and f"weights/{engine_name}.json" not in files:
         errors.append(f"есть {engine_name}, но нет паспорта {engine_name}.json")

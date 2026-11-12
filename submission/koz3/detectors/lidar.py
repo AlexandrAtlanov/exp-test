@@ -1,8 +1,12 @@
 """Детектор лидар: YOLO-seg на отмывках рельефа из LAS -> полигоны в UTM.
 
-Для каждого LAS строит отмывки бейзлайна (lidar_dem) во временной папке,
-режет каждую инференс-отмывку на тайлы с перекрытием, предсказывает маски
-и переводит их в полигоны в UTM региона. Список LAS берётся только из
+Для каждого LAS строит отмывки бейзлайна (lidar_dem) во временной папке и
+подаёт их модели одним из двух способов (LIDAR["infer_mode"]):
+- "whole" — как бейзлайн: вся отмывка сжата до LIDAR["whole_px"] и выровнена,
+  один кадр на отмывку (lidar_whole); так обучен model.pt бейзлайна;
+- "tiles" — нарезка на тайлы с перекрытием (как training/build_dataset.py);
+  дальше описан этот режим.
+Маски переводятся в полигоны в UTM региона. Список LAS берётся только из
 region.files["li"] (discovery) — один источник для is_available,
 estimate_seconds и run: рассинхрон паттернов поиска исключён (В1).
 Тайлы с долей валидных пикселей
@@ -23,9 +27,10 @@ tile_px выбирается с запасом против максимальн
 """
 
 import logging
+import re
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
 
@@ -39,7 +44,7 @@ from shapely.geometry import Polygon
 from .. import config, geometry, yolo_runtime
 from ..datatypes import Detection, Region
 from ..timing import Budget
-from . import lidar_dem
+from . import lidar_dem, lidar_whole
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,9 @@ PRIORITY: int = 1
 
 MARKUP_TYPE: str = "li"
 """Тип данных детектора для свойства markup_type."""
+
+_GROUND_SUFFIX = re.compile(r"[_\- ]ground$", re.IGNORECASE)
+"""Суффикс отфильтрованного облака: <имя>_ground.las — ground-версия <имя>.las."""
 
 _BYTES_PER_GB: float = 1e9
 """ГБ = 1e9 байт; в этих единицах калибруется seconds_per_gb."""
@@ -58,6 +66,9 @@ _model: yolo_runtime.LoadedModel | None = None
 _model_error: str = ""
 """Причина неудачной загрузки модели: повторы в этом прогоне не делаются."""
 
+_extra_models: dict[str, yolo_runtime.LoadedModel | None] = {}
+"""Кэш доп. моделей ансамбля (YOLO["extra_weights_pt"]) по имени файла; None — не загрузилась."""
+
 
 def is_available(region: Region) -> bool:
     """Детектор применим: есть LAS в регионе и веса (.pt или .engine).
@@ -66,7 +77,7 @@ def is_available(region: Region) -> bool:
     его же читают estimate_seconds и run (В1), поэтому is_available=True
     при пустом run исключён самой структурой, без сверки паттернов.
     """
-    if not region.files.get("li"):
+    if not _las_files(region):
         return False
     weights_dir = config.WEIGHTS_DIR
     has_pt = (weights_dir / str(config.YOLO["weights_pt"])).is_file()
@@ -81,7 +92,7 @@ def estimate_seconds(region: Region) -> float:
     В1): оценка и запуск видят одни и те же файлы.
     """
     total_bytes = 0
-    for las_path in region.files.get("li", []):
+    for las_path in _las_files(region):
         try:
             total_bytes += las_path.stat().st_size
         except OSError as exc:
@@ -91,7 +102,7 @@ def estimate_seconds(region: Region) -> float:
                 las_path.name,
                 exc,
             )
-    return total_bytes / _BYTES_PER_GB * float(config.LIDAR["seconds_per_gb"])
+    return total_bytes / _BYTES_PER_GB * float(config.LIDAR["seconds_per_gb"]) * _n_models(config)
 
 
 def run(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
@@ -102,12 +113,13 @@ def run(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
     найденные детекции возвращаются всегда. Список LAS — region.files["li"],
     как в is_available/estimate_seconds (единственный источник, В1).
     """
-    las_files = region.files.get("li") or []
+    las_files = _las_files(region)
     if not las_files:
         logger.warning("li %s: LAS-файлы не найдены", region.name)
         return []
 
     model: yolo_runtime.LoadedModel | None = None
+    models: list[yolo_runtime.LoadedModel] = []
     detections: list[Detection] = []
     for las_path in las_files:
         try:
@@ -133,9 +145,10 @@ def run(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
             model = _load_model_once()
             if model is None:
                 return []
+            models = [model, *_load_extra_models(cfg)]
         try:
             detections.extend(
-                _process_las(region, las_path, model, budget, cfg, las_estimate_s),
+                _process_las(region, las_path, models, budget, cfg, las_estimate_s),
             )
         except Exception:  # noqa: BLE001  # один LAS не роняет регион
             logger.exception(
@@ -146,10 +159,53 @@ def run(region: Region, budget: Budget, cfg: ModuleType) -> list[Detection]:
     return detections
 
 
+def _las_files(region: Region) -> list[Path]:
+    """LAS региона из region.files["li"] без исходников, у которых рядом есть ground-версия.
+
+    X.las убирается, если в той же папке есть X_ground.las (или X-ground, X ground): DEM
+    иначе строится дважды, а детекции дублируются. В отличие от бейзлайна (один LAS на
+    папку) несколько разных LAS в одной папке сохраняются — данные не теряются.
+    """
+    files = list(region.files.get("li", []))
+    ground_twins = {
+        (path.parent, _GROUND_SUFFIX.sub("", path.stem).lower())
+        for path in files
+        if _GROUND_SUFFIX.search(path.stem)
+    }
+    return [
+        path
+        for path in files
+        if _GROUND_SUFFIX.search(path.stem) or (path.parent, path.stem.lower()) not in ground_twins
+    ]
+
+
 def _las_seconds(las_path: Path, cfg: ModuleType) -> float:
-    """Оценка времени обработки одного LAS, с: размер в ГБ * seconds_per_gb."""
+    """Оценка времени обработки одного LAS, с: размер в ГБ * seconds_per_gb * число моделей."""
     size_gb = las_path.stat().st_size / _BYTES_PER_GB
-    return size_gb * float(cfg.LIDAR["seconds_per_gb"])
+    return size_gb * float(cfg.LIDAR["seconds_per_gb"]) * _n_models(cfg)
+
+
+def _n_models(cfg: ModuleType) -> int:
+    """Моделей в ансамбле: основная + YOLO["extra_weights_pt"]."""
+    return 1 + len(tuple(cfg.YOLO.get("extra_weights_pt", ())))
+
+
+def _load_extra_models(cfg: ModuleType) -> list[yolo_runtime.LoadedModel]:
+    """Доп. модели ансамбля (YOLO["extra_weights_pt"]); каждая грузится один раз на прогон.
+
+    Не загрузилась (нет файла, битые веса) — предупреждение и работа без неё.
+    """
+    loaded: list[yolo_runtime.LoadedModel] = []
+    for name in tuple(cfg.YOLO.get("extra_weights_pt", ())):
+        if name not in _extra_models:
+            try:
+                _extra_models[name] = yolo_runtime.load_model(pt_name=str(name))
+            except Exception as exc:  # noqa: BLE001  # ансамбль без этой модели
+                _extra_models[name] = None
+                logger.warning("li: доп. модель %s не загрузилась (%s) — без неё", name, exc)
+        if _extra_models[name] is not None:
+            loaded.append(_extra_models[name])
+    return loaded
 
 
 def _load_model_once() -> yolo_runtime.LoadedModel | None:
@@ -184,23 +240,28 @@ def _load_model_once() -> yolo_runtime.LoadedModel | None:
 def _process_las(
     region: Region,
     las_path: Path,
-    model: yolo_runtime.LoadedModel,
+    models: list[yolo_runtime.LoadedModel],
     budget: Budget,
     cfg: ModuleType,
     las_estimate_s: float,
 ) -> list[Detection]:
     """Обработать один LAS: отмывки во временной папке -> инференс -> Detection.
 
-    Временная папка живёт только внутри вызова. При нехватке бюджета между
+    Отмывки строятся один раз и подаются всем моделям ансамбля (первая — основная);
+    у детекций доп. моделей source — "<las>:<отмывка>:<веса>". Временная папка живёт
+    только внутри вызова. При нехватке бюджета между
     отмывками возвращается уже найденное; ошибка одной отмывки не отменяет
     остальные.
     """
     started_s = time.monotonic()
-    variants: tuple[str, ...] = tuple(cfg.LIDAR["infer_hillshades"])
+    allowed = {id(m): set(m.hillshades or cfg.LEGACY_HILLSHADES) for m in models}
+    variants: tuple[str, ...] = tuple(
+        v for v in cfg.LIDAR["infer_hillshades"] if any(v in a for a in allowed.values())
+    )
     if not variants:
         logger.warning("li %s: infer_hillshades пуст: %s", region.name, las_path.name)
         return []
-    per_variant_estimate_s = las_estimate_s / len(variants)
+    per_variant_estimate_s = las_estimate_s / len(variants) / len(models)
     found: list[Detection] = []
     per_variant: dict[str, int] = {}
     with tempfile.TemporaryDirectory(prefix="koz3_li_") as tmp_dir:
@@ -208,6 +269,7 @@ def _process_las(
             las_path,
             region.utm_crs,
             Path(tmp_dir),
+            variants=variants,  # только нужные инференсу отмывки
         )
         by_variant = _match_hillshades(tif_paths, cfg)
         for variant in variants:
@@ -220,7 +282,7 @@ def _process_las(
                     las_path.name,
                 )
                 continue
-            if not budget.can_afford(per_variant_estimate_s):
+            if not budget.can_afford(per_variant_estimate_s * len(models)):
                 logger.warning(
                     "li %s: бюджет %.0f с не покрывает отмывку %s (%s), возвращаю найденное (%d)",
                     region.name,
@@ -230,26 +292,34 @@ def _process_las(
                     len(found),
                 )
                 break
-            try:
-                new_detections = _predict_hillshade(
-                    region,
-                    las_path,
-                    tif_path,
-                    variant,
-                    model,
-                    budget,
-                    cfg,
-                )
-            except Exception:  # noqa: BLE001  # одна отмывка не роняет весь LAS
-                logger.exception(
-                    "li %s: ошибка отмывки %s (%s)",
-                    region.name,
-                    variant,
-                    las_path.name,
-                )
-                continue
-            found.extend(new_detections)
-            per_variant[variant] = len(new_detections)
+            for index, model in enumerate(models):
+                if variant not in allowed[id(model)]:
+                    continue  # модель не видела эту отмывку при обучении
+                try:
+                    new_detections = _predict_hillshade(
+                        region,
+                        las_path,
+                        tif_path,
+                        variant,
+                        model,
+                        budget,
+                        cfg,
+                    )
+                except Exception:  # noqa: BLE001  # одна отмывка не роняет весь LAS
+                    logger.exception(
+                        "li %s: ошибка отмывки %s (%s, модель %s)",
+                        region.name,
+                        variant,
+                        las_path.name,
+                        model.name or "основная",
+                    )
+                    continue
+                if index > 0:
+                    new_detections = [
+                        replace(det, source=f"{det.source}:{model.name}") for det in new_detections
+                    ]
+                found.extend(new_detections)
+                per_variant[variant] = per_variant.get(variant, 0) + len(new_detections)
     summary = ", ".join(f"{name}={count}" for name, count in per_variant.items())
     logger.info(
         "li %s: %s — %d детекций за %.1f с; по отмывкам: %s",
@@ -398,21 +468,64 @@ def _predict_hillshade(
         raster = _Raster(transform=src.transform, crs=src.crs, height=src.height, width=src.width)
         bands = src.read()
     image = yolo_runtime.to_model_image(bands)
-    tiles = _make_tiles(image, int(cfg.LIDAR["tile_px"]), float(cfg.LIDAR["overlap"]))
+    if str(cfg.LIDAR.get("infer_mode", "tiles")) == "whole":
+        return _predict_whole(image, raster, region, las_path, variant, model, cfg)
+    detections: list[Detection] = []
+    for factor in model.scales or cfg.LIDAR.get("scales", (1,)):
+        scaled, scaled_raster = _downscale(image, raster, float(factor))
+        found = _predict_tiles_at_scale(
+            scaled, scaled_raster, region, las_path, variant, model, budget, cfg
+        )
+        logger.info(
+            "li %s: %s, отмывка %s, масштаб ×%g (%dx%d) — детекций %d",
+            region.name,
+            las_path.name,
+            variant,
+            float(factor),
+            scaled_raster.width,
+            scaled_raster.height,
+            len(found),
+        )
+        detections.extend(found)
+    logger.info(
+        "li %s: %s, отмывка %s — детекций %d за %.1f с",
+        region.name,
+        las_path.name,
+        variant,
+        len(detections),
+        time.monotonic() - started_s,
+    )
+    return detections
+
+
+def _downscale(image: np.ndarray, raster: _Raster, factor: float) -> tuple[np.ndarray, _Raster]:
+    """Сжать отмывку в factor раз (INTER_AREA) и пересчитать привязку; 1 — без изменений."""
+    if factor <= 1.0:
+        return image, raster
+    scaled = yolo_runtime.downscale(image, factor)
+    height, width = scaled.shape[:2]
+    transform = raster.transform * Affine.scale(raster.width / width, raster.height / height)
+    return scaled, _Raster(transform, raster.crs, height, width)
+
+
+def _predict_tiles_at_scale(
+    image: np.ndarray,
+    raster: _Raster,
+    region: Region,
+    las_path: Path,
+    variant: str,
+    model: yolo_runtime.LoadedModel,
+    budget: Budget,
+    cfg: ModuleType,
+) -> list[Detection]:
+    """Тайлы одной (возможно сжатой) отмывки → детекции в UTM региона."""
+    tile_px = int(model.tile_px or cfg.LIDAR["tile_px"])
+    tiles = _make_tiles(image, tile_px, float(cfg.LIDAR["overlap"]))
     tiles, nodata_tiles = _valid_tiles(
         tiles,
         yolo_runtime.valid_pixel_mask(image),
         float(cfg.LIDAR["min_valid_share"]),
     )
-    if nodata_tiles:
-        logger.info(
-            "li %s: %s, отмывка %s — вне данных пропущено тайлов: %d из %d",
-            region.name,
-            las_path.name,
-            variant,
-            nodata_tiles,
-            len(tiles) + nodata_tiles,
-        )
     if not tiles:
         logger.warning(
             "li %s: %s, отмывка %s — все тайлы вне данных, инференс пропущен",
@@ -421,14 +534,81 @@ def _predict_hillshade(
             variant,
         )
         return []
-    detections = _predict_chunks(tiles, raster, region, las_path, variant, model, budget)
+    if nodata_tiles:
+        logger.info(
+            "li %s: %s, отмывка %s — тайлов %d, вне данных пропущено %d",
+            region.name,
+            las_path.name,
+            variant,
+            len(tiles),
+            nodata_tiles,
+        )
+    return _predict_chunks(tiles, raster, region, las_path, variant, model, budget)
+
+
+def _predict_whole(
+    image: np.ndarray,
+    raster: _Raster,
+    region: Region,
+    las_path: Path,
+    variant: str,
+    model: yolo_runtime.LoadedModel,
+    cfg: ModuleType,
+) -> list[Detection]:
+    """Режим бейзлайна: вся отмывка → сжатие до whole_px → выравнивание → один кадр.
+
+    Маски кадра переводятся в CRS отмывки одним аффинным преобразованием
+    (lidar_whole.frame_to_raster), затем в UTM региона. Отмывка без валидных
+    пикселей модели не подаётся.
+    """
+    started_s = time.monotonic()
+    valid_share = float(yolo_runtime.valid_pixel_mask(image).mean())
+    if valid_share < float(cfg.LIDAR["min_valid_share"]):
+        logger.warning(
+            "li %s: %s, отмывка %s — нет данных (%.3f), инференс пропущен",
+            region.name,
+            las_path.name,
+            variant,
+            valid_share,
+        )
+        return []
+    whole_px = int(cfg.LIDAR["whole_px"])
+    frame, scale = lidar_whole.downscale_image(image, whole_px)
+    angle, crop_offset = 0.0, (0, 0)
+    center = (frame.shape[1] / 2.0, frame.shape[0] / 2.0)
+    if bool(cfg.LIDAR["whole_align"]):
+        frame, angle, crop_offset, center = lidar_whole.align_and_crop_image(frame)
+    frame = np.ascontiguousarray(frame)
+    pixel_to_raster = lidar_whole.frame_to_raster(
+        raster.transform, scale, angle, crop_offset, center
+    )
+    [instances] = list(yolo_runtime.predict_tiles(model, [frame], imgsz=whole_px))
+    detections: list[Detection] = []
+    for inst in instances:
+        for geom in geometry.mask_to_polygons(inst.mask, pixel_to_raster):
+            detections.append(
+                Detection(
+                    geom=_to_region_crs(geom, raster.crs, region),
+                    class_name=inst.class_name,
+                    confidence=inst.confidence,
+                    markup_type=MARKUP_TYPE,
+                    region_name=region.name,
+                    source=f"{las_path.name}:{variant}",
+                    extra={"edge_cut": False},
+                )
+            )
     logger.info(
-        "li %s: %s, отмывка %s — тайлов %d (вне данных %d), детекций %d за %.1f с",
+        "li %s: %s, отмывка %s — целиком %dx%d → кадр %dx%d (масштаб %.3f, поворот %.1f°), "
+        "детекций %d за %.1f с",
         region.name,
         las_path.name,
         variant,
-        len(tiles),
-        nodata_tiles,
+        raster.width,
+        raster.height,
+        frame.shape[1],
+        frame.shape[0],
+        scale,
+        angle,
         len(detections),
         time.monotonic() - started_s,
     )
@@ -480,7 +660,12 @@ def _predict_chunks(
                 break
         chunk_started_s = time.monotonic()
         try:
-            predicted = yolo_runtime.predict_tiles(model, [tile.image for tile in chunk])
+            images = [tile.image for tile in chunk]
+            predicted = (
+                yolo_runtime.predict_tiles(model, images, rot90_tta=True)
+                if _use_tta(model)
+                else yolo_runtime.predict_tiles(model, images)
+            )
             for tile, instances in zip(chunk, predicted, strict=True):
                 detections.extend(
                     _tile_detections(tile, instances, raster, region, las_path.name, variant)
@@ -500,6 +685,12 @@ def _predict_chunks(
             )
         spent_s += time.monotonic() - chunk_started_s
     return detections
+
+
+def _use_tta(model: yolo_runtime.LoadedModel) -> bool:
+    """TTA поворотами: LIDAR["tta_rot90"] True/False — принудительно, None — по паспорту модели."""
+    forced = config.LIDAR.get("tta_rot90")
+    return bool(model.rot90) if forced is None else bool(forced)
 
 
 def _tile_detections(

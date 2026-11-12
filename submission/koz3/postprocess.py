@@ -26,24 +26,27 @@ def run(detections: list[Detection]) -> list[Detection]:
     """Прогнать детекции через конвейер постобработки.
 
     Шаги контракта: фильтр классов и порогов → чистка геометрии и минимальная
-    площадь → NMS внутри (class_name, markup_type) → упрощение колец →
-    лимит числа объектов по confidence. Возвращает новый список детекций;
-    порядок выхода детерминирован: группы по возрастанию ключа
-    (class_name, markup_type), внутри группы — целые раньше обрезанных краем
-    тайла, затем убывание confidence.
+    площадь → NMS внутри (class_name, markup_type) → копии курганов во второй
+    класс (config.KURGANY_CROSS_COPY) → упрощение колец → лимит числа объектов
+    по confidence. Возвращает новый список детекций; порядок выхода
+    детерминирован: группы по возрастанию ключа (class_name, markup_type),
+    внутри группы — целые раньше обрезанных краем тайла, затем убывание
+    confidence; копии курганов — в конце, в порядке исходных детекций.
     """
     n_input = len(detections)
     thresholded = _filter_threshold(detections)
     by_area = _filter_area(thresholded)
     deduplicated = _nms(by_area)
-    simplified = _simplify(deduplicated)
+    copied = _cross_copy(deduplicated)
+    simplified = _simplify(copied)
     result = _limit_features(simplified)
     logger.info(
-        "postprocess: вход %d, порог %d, площадь %d, NMS %d, итог %d",
+        "postprocess: вход %d, порог %d, площадь %d, NMS %d, копии курганов %d, итог %d",
         n_input,
         len(thresholded),
         len(by_area),
         len(deduplicated),
+        len(copied) - len(deduplicated),
         len(result),
     )
     return result
@@ -150,6 +153,51 @@ def _suppress_pair(
     iou = inter_m2 / union_m2
     cover = inter_m2 / min(area_a_m2, area_b_m2)
     return iou > config.NMS_IOU or cover > config.NMS_COVER
+
+
+def _cross_copy(detections: list[Detection]) -> list[Detection]:
+    """Добавить копии курганов во второй класс (config.KURGANY_CROSS_COPY, CROSS_COPY_PAIRS).
+
+    Копия — та же геометрия и markup_type, confidence × KURGANY_CROSS_COPY,
+    extra["cross_copy"] = True. Копия не делается, если в целевой группе
+    (класс, markup_type) уже есть дубль по правилу NMS (_suppress_pair) —
+    например, model.pt бейзлайна уже выдал курган в оба класса. Копии
+    между собой не проверяются: их источники уже прошли NMS в своём классе.
+    """
+    factor = config.KURGANY_CROSS_COPY
+    if factor is None or factor <= 0.0:
+        return detections
+    groups: dict[tuple[str, str], list[Polygon]] = {}
+    for det in detections:
+        groups.setdefault((det.class_name, det.markup_type), []).append(det.geom)
+    trees = {key: STRtree(geoms) for key, geoms in groups.items()}
+    copies: list[Detection] = []
+    for det in detections:
+        target = config.CROSS_COPY_PAIRS.get(det.class_name)
+        if target is None or det.extra.get("cross_copy"):
+            continue
+        key = (target, det.markup_type)
+        if key in trees and _has_duplicate(det.geom, groups[key], trees[key]):
+            continue
+        copies.append(
+            replace(
+                det,
+                class_name=target,
+                confidence=det.confidence * float(factor),
+                extra={**det.extra, "cross_copy": True},
+            )
+        )
+    return detections + copies
+
+
+def _has_duplicate(geom: Polygon, others: list[Polygon], tree: STRtree) -> bool:
+    """Есть ли среди others дубль geom по правилу NMS (_suppress_pair)."""
+    area = geom.area
+    for idx in tree.query(geom, predicate="intersects"):
+        other = others[int(idx)]
+        if _suppress_pair(geom, other, area, other.area):
+            return True
+    return False
 
 
 def _simplify(detections: list[Detection]) -> list[Detection]:

@@ -15,11 +15,7 @@ import sys
 import types
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-for _entry in (ROOT / "submission", ROOT / "tools"):
-    if str(_entry) not in sys.path:
-        sys.path.insert(0, str(_entry))
-
+import _bootstrap  # noqa: F401
 from shapely.geometry import box
 
 import solution
@@ -27,6 +23,7 @@ import validate_output
 from koz3 import config
 from koz3.datatypes import CLASSES, Detection
 
+ROOT = Path(__file__).resolve().parents[2]
 SOLUTION_FILE = ROOT / "submission" / "solution.py"
 UTM = "EPSG:32637"
 
@@ -133,9 +130,7 @@ def test_failing_detector_traceback_others_work(tmp_path, monkeypatch, caplog):
     """Критерий 2: упавший детектор — трейсбек в логе, остальные работают, код 0."""
     input_dir = _make_input(tmp_path)
     out_file = tmp_path / "result.geojson"
-    good, good_calls = _stub_detector(
-        "stub_good", priority=1, detections=_box_detections()
-    )
+    good, good_calls = _stub_detector("stub_good", priority=1, detections=_box_detections())
     boom, boom_calls = _stub_detector(
         "stub_boom", priority=2, error=RuntimeError("заглушка сломалась намеренно")
     )
@@ -152,6 +147,22 @@ def test_failing_detector_traceback_others_work(tmp_path, monkeypatch, caplog):
     assert data["type"] == "FeatureCollection"
     assert len(data["features"]) == 2
     assert validate_output.validate(out_file)["defects"] == []
+
+
+def test_unimportable_detector_does_not_disable_others(tmp_path, monkeypatch, caplog):
+    """Детектор, который не импортируется (нет библиотеки в образе), пропускается один."""
+    input_dir = _make_input(tmp_path)
+    out_file = tmp_path / "result.geojson"
+    good, good_calls = _stub_detector("stub_good", priority=1, detections=_box_detections())
+    _install_detectors(monkeypatch, (good, good_calls))
+    monkeypatch.setattr(config, "ENABLED_DETECTORS", ("stub_good", "stub_missing_module"))
+
+    assert solution.main([str(input_dir), str(out_file)]) == 0
+
+    assert good_calls["run"] == 1
+    assert "stub_missing_module" in caplog.text
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert len(data["features"]) == 2
 
 
 def test_budget_skip_detectors_still_writes(tmp_path, monkeypatch, caplog):
@@ -178,9 +189,7 @@ def test_output_directory_variant(tmp_path, monkeypatch):
     input_dir = _make_input(tmp_path)
     out_dir = tmp_path / "results"
     out_dir.mkdir()
-    stub, calls = _stub_detector(
-        "stub_dir", priority=1, detections=_box_detections()
-    )
+    stub, calls = _stub_detector("stub_dir", priority=1, detections=_box_detections())
     _install_detectors(monkeypatch, (stub, calls))
 
     assert solution.main([str(input_dir), str(out_dir)]) == 0
@@ -200,15 +209,11 @@ def test_checkpoint_between_pairs_and_priority(tmp_path, monkeypatch):
         # ко времени запуска второго детектора файл уже несёт результат
         # первого (промежуточная запись после каждой пары)
         try:
-            seen["features"] = len(
-                json.loads(out_file.read_text(encoding="utf-8"))["features"]
-            )
+            seen["features"] = len(json.loads(out_file.read_text(encoding="utf-8"))["features"])
         except (OSError, ValueError):
             seen["features"] = None
 
-    first, first_calls = _stub_detector(
-        "stub_a", priority=1, detections=_box_detections()[:1]
-    )
+    first, first_calls = _stub_detector("stub_a", priority=1, detections=_box_detections()[:1])
     second, second_calls = _stub_detector(
         "stub_b", priority=2, detections=_box_detections()[1:], on_run=on_run_second
     )
